@@ -34,6 +34,34 @@ from sky.utils.db import db_utils
 
 logger = sky_logging.init_logger(__name__)
 
+# uvicorn 0.36.0 replaced Config.setup_event_loop() with get_loop_factory()
+# and dropped the `target` parameter from the multiprocess supervisor
+# (workers now build their own Server from the config). SkyPilot subclasses
+# both, so bridge the two APIs here instead of pinning uvicorn below 0.36.
+_UVICORN_PRE_0_36 = not hasattr(uvicorn.Config, 'get_loop_factory')
+
+
+def _setup_event_loop(config: uvicorn.Config) -> None:
+    """Set up the event loop policy across uvicorn versions.
+
+    Before 0.36, Config.setup_event_loop() installed a global event loop
+    policy (uvloop when configured or auto-detected) so that a plain
+    asyncio.run() picks the right loop. Newer uvicorn returns a loop
+    *factory* instead; translate the common cases back into a policy so the
+    asyncio.run() call in Server.run() keeps working unchanged.
+    """
+    if _UVICORN_PRE_0_36:
+        config.setup_event_loop()
+        return
+    if config.loop not in ('auto', 'uvloop'):
+        return
+    try:
+        import uvloop  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        return
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+
+
 # A short wait for the endpoints update propagated to the ingress/LB
 _GRACE_WAIT_SECONDS = 5
 # File lock path for coordinating graceful shutdown across processes
@@ -277,7 +305,7 @@ class Server(uvicorn.Server):
         add_timestamp_prefix_for_server_logs()
         context_utils.hijack_sys_attrs()
         # Use default loop policy of uvicorn (use uvloop if available).
-        self.config.setup_event_loop()
+        _setup_event_loop(self.config)
         # Reap this worker's per-pid prometheus multiproc files at exit so
         # that recycled workers do not leak stale liveall gauge values
         # (e.g. event-loop-lag peaks recorded just before the worker died)
@@ -341,6 +369,12 @@ class SlowStartMultiprocess(multiprocess.Multiprocess):
         Args:
             config: The uvicorn config.
         """
+        # uvicorn >= 0.36 dropped the `target` parameter: each worker builds
+        # its own Server from the config. Keep accepting it so the worker
+        # runs SkyPilot's Server subclass (see slow_start_processes below).
+        self._run_target = kwargs.get('target')
+        if not _UVICORN_PRE_0_36:
+            kwargs.pop('target', None)
         super().__init__(config, **kwargs)
         self._init_thread: Optional[threading.Thread] = None
 
@@ -351,13 +385,24 @@ class SlowStartMultiprocess(multiprocess.Multiprocess):
                                              daemon=True)
         self._init_thread.start()
 
+    def _new_process(self) -> multiprocess.Process:
+        if _UVICORN_PRE_0_36:
+            return multiprocess.Process(self.config, self._run_target,
+                                        self.sockets)
+        process = multiprocess.Process(self.config, self.sockets)
+        if self._run_target is not None:
+            # The new Process lazily builds a plain uvicorn.Server; seed it
+            # with the Server subclass the target is bound to, so the worker
+            # runs SkyPilot's customized run() as before.
+            process._server = self._run_target.__self__  # pylint: disable=protected-access
+        return process
+
     def slow_start_processes(self) -> None:
         """Initialize processes with slow start."""
         to_start = []
         # Init N worker processes
         for _ in range(self.processes_num):
-            to_start.append(
-                multiprocess.Process(self.config, self.target, self.sockets))
+            to_start.append(self._new_process())
         # Start the processes with slow start, we only append start to
         # self.processes because Uvicorn periodically restarts unstarted
         # workers.
