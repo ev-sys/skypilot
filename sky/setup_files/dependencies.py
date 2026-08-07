@@ -60,9 +60,11 @@ install_requires = [
     # changes.
     # Notes for current version check:
     # - uvicorn 0.33.0 is the latest version that supports Python 3.9
-    # - uvicorn 0.36.0 removes setup_event_loop thus breaks SkyPilot's custom
-    #   behavior.
-    'uvicorn[standard] >=0.33.0, <0.36.0',
+    # - uvicorn 0.36.0 removed Config.setup_event_loop() and the `target`
+    #   parameter of the multiprocess supervisor; sky/server/uvicorn.py
+    #   carries a compatibility bridge for both APIs, so the ceiling is
+    #   dropped to allow coexistence with packages requiring newer uvicorn.
+    'uvicorn[standard] >=0.33.0',
     'fastapi',
     # Some pydantic versions are not compatible with ray. Adopted from ray's
     # setup.py:
