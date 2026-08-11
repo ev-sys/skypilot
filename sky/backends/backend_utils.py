@@ -1185,8 +1185,11 @@ def write_cluster_config(
 
     modal_cloud_bucket_mounts = []
     if isinstance(cloud, clouds.Modal):
+        # uvicorn-compat write_cluster_config has no storage_mounts kwarg yet
+        # (OpenPipe Modal PR adds it). Bucket mounts stay empty until that
+        # signature lands; GPU launch does not need them.
         modal_cloud_bucket_mounts = _get_modal_cloud_bucket_mounts(
-            storage_mounts, dryrun=dryrun)
+            None, dryrun=dryrun)
 
     runcmd = skypilot_config.get_effective_region_config(
         cloud=str(to_provision.cloud).lower(),
