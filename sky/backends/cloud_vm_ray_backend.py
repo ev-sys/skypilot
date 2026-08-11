@@ -353,6 +353,7 @@ def _get_cluster_config_template(cloud):
         clouds.Seeweb: 'seeweb-ray.yml.j2',
         clouds.Yotta: 'yotta-ray.yml.j2',
         clouds.Mithril: 'mithril-ray.yml.j2',
+        clouds.Modal: 'modal-ray.yml.j2',
         clouds.Verda: 'verda-ray.yml.j2',
     }
     return cloud_to_template[type(cloud)]
@@ -6750,6 +6751,9 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         # Handle cases when there aren't any Storages with either MOUNT or
         # MOUNT_CACHED mode.
         if not storage_mounts:
+            return
+
+        if isinstance(handle.launched_resources.cloud, clouds.Modal):
             return
         start = time.time()
         runners = handle.get_command_runners()
