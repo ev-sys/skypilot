@@ -60,9 +60,11 @@ install_requires = [
     # changes.
     # Notes for current version check:
     # - uvicorn 0.33.0 is the latest version that supports Python 3.9
-    # - uvicorn 0.36.0 removes setup_event_loop thus breaks SkyPilot's custom
-    #   behavior.
-    'uvicorn[standard] >=0.33.0, <0.36.0',
+    # - uvicorn 0.36.0 removed Config.setup_event_loop() and the `target`
+    #   parameter of the multiprocess supervisor; sky/server/uvicorn.py
+    #   carries a compatibility bridge for both APIs, so the ceiling is
+    #   dropped to allow coexistence with packages requiring newer uvicorn.
+    'uvicorn[standard] >=0.33.0',
     'fastapi',
     # Some pydantic versions are not compatible with ray. Adopted from ray's
     # setup.py:
@@ -279,6 +281,7 @@ cloud_dependencies: Dict[str, List[str]] = {
     'hyperbolic': [],  # No dependencies needed for hyperbolic
     'seeweb': ['ecsapi==0.4.0'],
     'mithril': [],  # No dependencies needed for mithril
+    'modal': ['modal>=1.5.0; python_version>="3.10"'],
     'shadeform': [],  # No dependencies needed for shadeform
     'slurm': ['python-hostlist'],
     'yotta': [],  # No dependencies needed for Yotta
@@ -292,6 +295,7 @@ if sys.version_info < (3, 10):
     # Nebius needs python3.10. If python 3.9 [all] will not install nebius
     clouds_for_all.remove('nebius')
     clouds_for_all.remove('seeweb')
+    clouds_for_all.remove('modal')
     # latest ibm-cloud-sdk-core installation fails on Python 3.9,
     # so we remove it from the [all] installation.
     clouds_for_all.remove('ibm')
