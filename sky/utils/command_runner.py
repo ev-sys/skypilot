@@ -1,4 +1,5 @@
 """Runner for commands to be executed on the cluster."""
+import base64
 import enum
 import fcntl
 import hashlib
@@ -1927,6 +1928,371 @@ class KubernetesCommandRunner(CommandRunner):
             # only need to do this when ~ is at the beginning of the path.
             get_remote_home_dir=self.get_remote_home_dir,
             timeout=timeout)
+
+
+class ModalCommandRunner(CommandRunner):
+    """Runner for commands on a Modal Server container.
+
+    Modal has no SSH. Kubernetes solves the same shape with `kubectl exec`, and
+    this runner is modelled on ``KubernetesCommandRunner`` -- but it cannot
+    reuse that class's ``rsync_helper.sh`` ``--rsh`` trick, and the reason is
+    worth recording so nobody tries again.
+
+    ``modal container exec`` has four properties, all verified live against
+    modal 1.5.3:
+
+    1. **No stdin.** ``--no-pty`` runs ``_ContainerProcess.wait()``, never
+       ``attach()``. ``rsync --rsh`` needs a bidirectional pipe, so this alone
+       ends it. ``--pty`` does forward stdin but only through a raw local TTY,
+       which mangles binary.
+    2. **stderr is merged into stdout** (``stderr=StreamType.STDOUT``).
+       Verified: ``echo X >&2`` in the container arrives on the *local stdout*.
+       There is no flag to separate them -- ``exec`` exposes only
+       ``--pty/--no-pty``. rsync's protocol needs an exclusive stdout, and
+       ``separate_stderr=True`` cannot be honoured here at all.
+    3. **argv is capped near 8 KB and fails SILENTLY** -- 8 KB works, 16 KB
+       returns rc=0 with empty output and no error anywhere.
+    4. **Output is silently truncated at 8192 characters** unless the remote
+       command lingers, because ``wait()`` returns on the exit status while the
+       output stream is still draining.
+
+    So file sync does not go over this channel in bulk. Provision-time files
+    are baked into the image (``Image.add_local_dir(copy=True)``, see
+    ``sky.provision.modal.modal_utils.build_image``) and only small residual
+    deltas travel as chunked argv here.
+
+    Every command shells out to the ``modal`` CLI. That is not an oversight:
+    Modal exposes no *public* SDK-level exec for non-Sandbox containers, and the
+    private in-process path (``TaskCommandRouterClient`` / ``_ContainerProcess``)
+    would tie the provisioner to Modal internals.
+    """
+
+    # Residual deltas only. Anything larger belongs in the image bake; failing
+    # loudly beats a twenty-minute silent crawl through 8 KB argv chunks.
+    _MAX_CHUNKED_TRANSFER_BYTES = 4 * 1024 * 1024
+    # base64 wraps at 76 columns; ~78 lines keeps a read comfortably inside the
+    # argv budget while amortising per-exec latency.
+    _B64_LINES_PER_READ = 78
+
+    def __init__(self, node: Tuple[str, str], **kwargs):
+        """Initialize ModalCommandRunner.
+
+        Args:
+            node: ``(container_id, app_id)`` -- the Modal task to exec into and
+                the App that owns it.
+        """
+        del kwargs
+        super().__init__(node)
+        self.container_id, self.app_id = node
+
+    @property
+    def node_id(self) -> str:
+        # A Modal Server is a SINGLE container, so `gpu="H100:2"` is two GPUs on
+        # ONE node, never two nodes. Keying identity on the App rather than the
+        # container makes that explicit and keeps the identity stable across the
+        # container replacements Modal performs on health-check failure.
+        return f'modal-{self.app_id}'
+
+    def _inline_command_quote_levels(self) -> int:
+        # The command reaches the container as argv on the CLI; only the remote
+        # shell's quoting survives.
+        return 1
+
+    def max_inline_command_length(self) -> int:
+        # pylint: disable-next=import-outside-toplevel
+        from sky.provision.modal import modal_utils
+        return modal_utils.argv_budget()
+
+    def _exec_argv(self, script: str) -> List[str]:
+        return [
+            'modal', 'container', 'exec', self.container_id, '--no-pty', '--',
+            'bash', '-c', script
+        ]
+
+    def _check_argv_budget(self, script: str) -> None:
+        budget = self.max_inline_command_length()
+        if len(script) > budget:
+            raise exceptions.CommandError(
+                1, script[:200],
+                f'Modal exec command is {len(script)} bytes, over the '
+                f'{budget}-byte argv budget. Beyond roughly 8 KB '
+                '`modal container exec` fails silently (rc=0, empty output), '
+                'so this is refused rather than sent.', None)
+
+    def _raw_exec(self,
+                  script: str,
+                  timeout: Optional[int] = None) -> Tuple[int, str, str]:
+        """Run a script in the container, returning (rc, stdout, stderr).
+
+        stdout carries the container's stderr too -- see the class docstring.
+        """
+        self._check_argv_budget(script)
+        proc = subprocess.run(self._exec_argv(script),
+                              capture_output=True,
+                              text=True,
+                              timeout=timeout,
+                              check=False)
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def _exec_checked(self,
+                      command: str,
+                      timeout: Optional[int] = None) -> Tuple[int, str]:
+        """Run a command and recover its full output even if the tail is lost.
+
+        The command's output is teed to a file in the container so that
+        retrieval is idempotent. In the common case one round trip suffices --
+        the sentinel proves nothing was truncated. When the 8192-char drain race
+        eats the tail, the output is re-read from that file, which is safe to
+        repeat because it does not re-run anything.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from sky.provision.modal import modal_utils
+        token = uuid.uuid4().hex
+        sentinel = f'__SKY_{token}__'
+        out_file = f'/tmp/.sky_exec_{token}.out'
+        rc_file = f'/tmp/.sky_exec_{token}.rc'
+        script = modal_utils.drain_guard(
+            f'{{ {command}; }} 2>&1 | tee {out_file}; '
+            f'__sky_inner=${{PIPESTATUS[0]}}; '
+            f'echo $__sky_inner > {rc_file}; '
+            f'(exit $__sky_inner)', sentinel)
+        _, stdout, _ = self._raw_exec(script, timeout=timeout)
+        payload, returncode, complete = modal_utils.split_sentinel(
+            stdout, sentinel)
+        if complete:
+            return returncode or 0, payload
+        # Tail lost to the drain race. Re-read idempotently, with a longer
+        # linger.
+        logger.debug('Modal exec output was truncated; re-reading from '
+                     f'{out_file}.')
+        reread_sentinel = f'__SKYRE_{token}__'
+        reread = modal_utils.drain_guard(
+            f'cat {out_file} 2>/dev/null; '
+            f'(exit $(cat {rc_file} 2>/dev/null || echo 1))', reread_sentinel)
+        _, stdout2, _ = self._raw_exec(reread, timeout=timeout)
+        payload2, rc2, complete2 = modal_utils.split_sentinel(
+            stdout2, reread_sentinel)
+        if not complete2:
+            raise exceptions.CommandError(
+                1, command[:200],
+                'Modal exec output could not be recovered: the container '
+                'truncated it twice. This is the 8192-character drain race in '
+                '`modal container exec`.', None)
+        return rc2 or 0, payload2
+
+    @timeline.event
+    @context_utils.cancellation_guard
+    def run(
+            self,
+            cmd: Union[str, List[str]],
+            *,
+            port_forward: Optional[List[int]] = None,
+            require_outputs: bool = False,
+            # Advanced options.
+            log_path: str = os.devnull,
+            process_stream: bool = True,
+            stream_logs: bool = True,
+            ssh_mode: SshMode = SshMode.NON_INTERACTIVE,
+            separate_stderr: bool = False,
+            connect_timeout: Optional[int] = None,
+            source_bashrc: bool = False,
+            skip_num_lines: int = 0,
+            run_in_background: bool = False,
+            **kwargs) -> Union[int, Tuple[int, str, str]]:
+        """Run ``cmd`` in the Modal container via ``modal container exec``."""
+        del port_forward, connect_timeout, ssh_mode, kwargs  # unused
+        if separate_stderr:
+            # Not a shortcut: `modal container exec` merges the container's
+            # stderr into stdout before we see it, so the split is already
+            # gone by the time it reaches this process.
+            logger.debug('Modal exec cannot separate stderr from stdout; '
+                         'returning the merged stream as stdout.')
+
+        command_str = self._get_command_to_run(
+            cmd,
+            process_stream,
+            separate_stderr=True,
+            skip_num_lines=skip_num_lines,
+            source_bashrc=source_bashrc,
+            run_in_background=run_in_background)
+
+        if run_in_background:
+            # Nothing to collect; the drain race is irrelevant.
+            rc, _, _ = self._raw_exec(command_str)
+            return (rc, '', '') if require_outputs else rc
+
+        returncode, output = self._exec_checked(command_str)
+
+        if log_path != os.devnull:
+            log_dir = os.path.expanduser(os.path.dirname(log_path))
+            os.makedirs(log_dir, exist_ok=True)
+            with open(os.path.expanduser(log_path), 'a', encoding='utf-8') as f:
+                f.write(output)
+        if stream_logs and process_stream:
+            for line in output.splitlines():
+                logger.info(line)
+
+        if require_outputs:
+            return returncode, output, ''
+        return returncode
+
+    # ---------------------------------------------------------------- rsync
+
+    @timeline.event
+    def rsync(
+        self,
+        source: str,
+        target: str,
+        *,
+        up: bool,
+        log_path: str = os.devnull,
+        stream_logs: bool = True,
+        max_retry: int = 1,
+        timeout: Optional[int] = None,
+    ) -> None:
+        """Sync files to/from the container without rsync's wire protocol.
+
+        rsync-over-exec is impossible here (see the class docstring), so this
+        ships a tar archive through the same 8 KB argv channel, skipping the
+        transfer entirely when the target already holds identical content --
+        which is the normal case, because provision-time files were baked into
+        the image.
+        """
+        del stream_logs, max_retry  # handled by the exec layer
+        if up:
+            self._rsync_up(source, target, timeout)
+        else:
+            self._rsync_down(source, target, timeout)
+
+    def _make_archive(self, source: str) -> bytes:
+        """tar.gz the source, honouring rsync's trailing-slash semantics."""
+        # pylint: disable-next=import-outside-toplevel
+        import tarfile
+        resolved = pathlib.Path(source).expanduser()
+        contents_only = source.endswith('/') and resolved.is_dir()
+        buf = tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False)  # pylint: disable=consider-using-with
+        try:
+            with tarfile.open(buf.name, 'w:gz') as tar:
+                if contents_only:
+                    for child in sorted(resolved.iterdir()):
+                        tar.add(str(child), arcname=child.name)
+                else:
+                    tar.add(str(resolved), arcname=resolved.name)
+            with open(buf.name, 'rb') as f:
+                data = f.read()
+        finally:
+            os.unlink(buf.name)
+        return data
+
+    def _rsync_up(self, source: str, target: str,
+                  timeout: Optional[int]) -> None:
+        # pylint: disable-next=import-outside-toplevel
+        from sky.provision.modal import modal_utils
+        resolved = pathlib.Path(source).expanduser()
+        # Mirror rsync: a file lands AT the target, a directory lands INSIDE
+        # it. The image bake uses the same rule, so the marker paths line up.
+        if resolved.is_dir() and not source.endswith('/'):
+            placed = f'{target.rstrip("/")}/{resolved.name}'
+            dest_dir = target
+        else:
+            placed = target
+            dest_dir = str(pathlib.PurePosixPath(target).parent)
+        marker = modal_utils.marker_path(placed)
+        digest = modal_utils.content_digest(str(resolved))
+
+        rc, out = self._exec_checked(
+            f'cat {shlex.quote(marker)} 2>/dev/null || true', timeout=timeout)
+        if rc == 0 and digest in out:
+            logger.debug(f'Modal sync: {target} already matches {digest[:12]}; '
+                         'nothing to transfer (baked into the image).')
+            return
+
+        data = self._make_archive(source)
+        if len(data) > self._MAX_CHUNKED_TRANSFER_BYTES:
+            raise exceptions.CommandError(
+                1, f'rsync {source} -> {target}',
+                f'Modal file sync of {len(data)} bytes exceeds the '
+                f'{self._MAX_CHUNKED_TRANSFER_BYTES}-byte limit for the exec '
+                'channel. `modal container exec` carries no stdin and caps '
+                'argv near 8 KB, so large payloads must be baked into the '
+                'image at provision time instead.', None)
+
+        staging = f'/tmp/.sky_up_{uuid.uuid4().hex}.b64'
+        chunk_size = max(1024, self.max_inline_command_length() - 512)
+        chunks = modal_utils.encode_chunks(data, chunk_size)
+        self._exec_checked(f'rm -f {staging}', timeout=timeout)
+        for chunk in chunks:
+            rc, out = self._exec_checked(
+                f'printf %s {shlex.quote(chunk)} >> {staging}', timeout=timeout)
+            if rc != 0:
+                raise exceptions.CommandError(
+                    rc, 'modal upload chunk',
+                    f'Failed to stage a file chunk in the container: {out}',
+                    None)
+        rc, out = self._exec_checked(
+            f'mkdir -p {shlex.quote(dest_dir)} && '
+            f'base64 -d {staging} | tar xzf - -C {shlex.quote(dest_dir)} && '
+            f'rm -f {staging} && '
+            f'printf %s {shlex.quote(digest)} > {shlex.quote(marker)}',
+            timeout=timeout)
+        if rc != 0:
+            raise exceptions.CommandError(
+                rc, f'rsync {source} -> {target}',
+                f'Failed to unpack the transferred archive: {out}', None)
+
+    def _rsync_down(self, source: str, target: str,
+                    timeout: Optional[int]) -> None:
+        staging = f'/tmp/.sky_down_{uuid.uuid4().hex}'
+        rc, out = self._exec_checked(
+            f'set -e; tar czf {staging}.tgz -C '
+            f'{shlex.quote(str(pathlib.PurePosixPath(source).parent))} '
+            f'{shlex.quote(pathlib.PurePosixPath(source).name)}; '
+            f'base64 {staging}.tgz > {staging}.b64; '
+            f'stat -c %s {staging}.tgz; wc -l < {staging}.b64',
+            timeout=timeout)
+        if rc != 0:
+            raise exceptions.CommandError(
+                rc, f'rsync down {source}',
+                f'Failed to archive {source} in the container: {out}', None)
+        numbers = [int(t) for t in out.split() if t.strip().isdigit()]
+        if len(numbers) < 2:
+            raise exceptions.CommandError(
+                1, f'rsync down {source}',
+                f'Could not read the archive size for {source}: {out}', None)
+        size, total_lines = numbers[0], numbers[-1]
+        if size > self._MAX_CHUNKED_TRANSFER_BYTES:
+            raise exceptions.CommandError(
+                1, f'rsync down {source}',
+                f'Modal file sync of {size} bytes exceeds the '
+                f'{self._MAX_CHUNKED_TRANSFER_BYTES}-byte limit for the exec '
+                'channel.', None)
+
+        encoded: List[str] = []
+        start = 1
+        while start <= total_lines:
+            end = min(start + self._B64_LINES_PER_READ - 1, total_lines)
+            # Idempotent: a re-read of the same line range is always safe.
+            rc, chunk = self._exec_checked(
+                f"sed -n '{start},{end}p' {staging}.b64", timeout=timeout)
+            if rc != 0:
+                raise exceptions.CommandError(
+                    rc, f'rsync down {source}',
+                    f'Failed to read the archive from the container: {chunk}',
+                    None)
+            encoded.append(''.join(chunk.split()))
+            start = end + 1
+        self._exec_checked(f'rm -f {staging}.tgz {staging}.b64',
+                           timeout=timeout)
+
+        data = base64.b64decode(''.join(encoded))
+        # pylint: disable-next=import-outside-toplevel
+        import tarfile
+        os.makedirs(os.path.expanduser(target), exist_ok=True)
+        with tempfile.NamedTemporaryFile(suffix='.tgz') as tmp:
+            tmp.write(data)
+            tmp.flush()
+            with tarfile.open(tmp.name, 'r:gz') as tar:
+                tar.extractall(os.path.expanduser(target))
 
 
 class LocalProcessCommandRunner(CommandRunner):
