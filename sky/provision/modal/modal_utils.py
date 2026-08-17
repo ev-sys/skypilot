@@ -88,8 +88,11 @@ _IMAGE_PYTHON_VERSION = '3.12'
 # `procps`/`lsof` for SkyPilot's process probes, `rsync` because the *remote*
 # side of a file sync still runs rsync locally inside the container, `curl` for
 # readiness probes. No NVIDIA packages: Modal supplies the driver stack.
+# `sudo` is required even though the container runs as root: SkyPilot's shared
+# setup_commands invoke it unconditionally, and a missing binary fails the
+# whole SETUP rather than being skipped.
 _IMAGE_SYSTEM_PACKAGES = ('rsync', 'curl', 'procps', 'patch', 'lsof', 'tar',
-                          'coreutils')
+                          'coreutils', 'sudo')
 
 
 def build_image(named_image: Optional[str], docker_image: Optional[str],
