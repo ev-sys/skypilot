@@ -142,13 +142,17 @@ def build_image(named_image: Optional[str], docker_image: Optional[str],
         remote_path = mount['RemotePath']
         if not os.path.exists(local_path):
             continue
-        # Mirror rsync's placement exactly, because SkyPilot will later run the
-        # equivalent rsync against these same pairs and must find them already
-        # in place: a file lands AT the target, a directory lands INSIDE it.
+        # Mirror the placement SkyPilot's own rsync produces, because it will
+        # later run the equivalent sync against these same pairs and must find
+        # them already in place: a file lands AT the target, and a directory's
+        # CONTENTS land in the target (SkyPilot appends the trailing slash for
+        # every directory source). Modal's `add_local_dir` already copies the
+        # directory's contents to `remote_path`, so this is a plain pass-through
+        # -- appending the basename here would bury everything one level deeper
+        # than the later sync looks for it.
         remote_path = abs_remote_path(remote_path)
         if os.path.isdir(local_path):
-            dest = (f'{remote_path.rstrip("/")}/'
-                    f'{os.path.basename(local_path.rstrip("/"))}')
+            dest = remote_path
             image = image.add_local_dir(local_path, dest, copy=True)
         else:
             dest = remote_path

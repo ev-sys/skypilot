@@ -417,6 +417,28 @@ def _optimize_file_mounts(tmp_yaml_path: str) -> None:
             shell=True,
             check=True)
 
+    # Modal has no SSH and no stdin on its exec channel, so its provisioner
+    # bakes file mounts into the image at provision time instead of pushing
+    # them afterwards, and stamps digest markers so this rsync recognises the
+    # baked content and transfers nothing.
+    #
+    # That only works if the provider block tracks the mount we ACTUALLY sync.
+    # It is rendered from the template before this function runs, so it still
+    # lists the pre-consolidation paths (wheel, yaml, credentials) while
+    # `file_mounts` has just been collapsed into a single runtime-files
+    # directory. The markers then never match, and the 2.8 MB wheel is pushed
+    # through a ~1.4 KB/s channel one 4 KB `modal container exec` at a time.
+    # Re-point it at the consolidated mount.
+    if yaml_config.get('provider', {}).get('module') == 'sky.provision.modal':
+        # Note this is the per-node-type `node_config`, which is what
+        # `sky/provision/modal/instance.py` actually reads -- not the
+        # `provider` block, which carries a same-named key.
+        for node_type in yaml_config.get('available_node_types', {}).values():
+            node_type.setdefault('node_config', {})['FileMounts'] = [{
+                'RemotePath': _REMOTE_RUNTIME_FILES_DIR,
+                'LocalPath': local_runtime_files_dir,
+            }]
+
     yaml_utils.dump_yaml(tmp_yaml_path, yaml_config)
 
 

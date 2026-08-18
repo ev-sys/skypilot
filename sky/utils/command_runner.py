@@ -2006,6 +2006,7 @@ class ModalCommandRunner(CommandRunner):
     def _exec_argv(self, script: str) -> List[str]:
         # pylint: disable-next=import-outside-toplevel
         from sky.provision.modal import modal_utils
+
         # NOT a bare 'modal': this is the transport for *every* command
         # SkyPilot runs on a Modal node, and the API server frequently runs
         # with a PATH that does not include the environment Modal was
@@ -2027,6 +2028,43 @@ class ModalCommandRunner(CommandRunner):
                 '`modal container exec` fails silently (rc=0, empty output), '
                 'so this is refused rather than sent.', None)
 
+    def _stage_script(self, script: str, timeout: Optional[int]) -> str:
+        """Write an over-budget script into the container, return its path.
+
+        `modal container exec` caps argv near 8 KB, but SkyPilot's own setup
+        commands legitimately exceed it (the `/bin/bash --login -c -i` preamble
+        alone is multiple KB). Refusing them makes the cloud unusable, so send
+        the script as a few base64 chunks and run it from a file instead.
+
+        Deliberately built on `_raw_exec`, not `_exec_checked`: each chunk is a
+        short `printf` whose output nobody reads, so it needs neither the
+        drain guard nor the sentinel round trip. That also bounds the recursion
+        -- every command issued here is far under budget, so staging can never
+        re-enter itself.
+        """
+        token = uuid.uuid4().hex
+        path = f'/tmp/.sky_script_{token}.sh'
+        staged_b64 = f'{path}.b64'
+        data = base64.b64encode(script.encode()).decode()
+        # Room for the `printf %s '...' >> <path>` wrapper around each chunk.
+        chunk_size = max(1024, self.max_inline_command_length() - 512)
+
+        def _run(cmd: str, what: str) -> None:
+            rc, out, err = self._raw_exec(cmd, timeout=timeout)
+            if rc != 0:
+                raise exceptions.CommandError(
+                    rc, what, f'Failed to stage a script in the container: '
+                    f'{out or err}', None)
+
+        _run(f'rm -f {staged_b64} {path}', 'modal stage script (reset)')
+        for i in range(0, len(data), chunk_size):
+            _run(
+                f'printf %s {shlex.quote(data[i:i + chunk_size])} >> '
+                f'{staged_b64}', 'modal stage script (chunk)')
+        _run(f'base64 -d {staged_b64} > {path} && rm -f {staged_b64}',
+             'modal stage script (decode)')
+        return path
+
     def _raw_exec(self,
                   script: str,
                   timeout: Optional[int] = None) -> Tuple[int, str, str]:
@@ -2034,6 +2072,11 @@ class ModalCommandRunner(CommandRunner):
 
         stdout carries the container's stderr too -- see the class docstring.
         """
+        if len(script) > self.max_inline_command_length():
+            # Too big for argv: stage it and run the (tiny) file instead. The
+            # script's own semantics are unchanged -- any sentinel or drain
+            # guard it carries still runs and still reaches stdout.
+            script = f'bash {self._stage_script(script, timeout)}'
         self._check_argv_budget(script)
         proc = subprocess.run(self._exec_argv(script),
                               capture_output=True,
@@ -2177,7 +2220,15 @@ class ModalCommandRunner(CommandRunner):
         # pylint: disable-next=import-outside-toplevel
         import tarfile
         resolved = pathlib.Path(source).expanduser()
-        contents_only = source.endswith('/') and resolved.is_dir()
+        # Contents-only for ANY directory, not just a trailing-slash one.
+        # SkyPilot never relies on bare-rsync trailing-slash semantics here: its
+        # own wrapper appends the slash itself for every directory source (see
+        # `CommandRunner._rsync`, `os.path.join(full_source_str, '')`), so on
+        # every other cloud a directory's *contents* land in the target. Modal
+        # must place them identically or the runtime files end up one level too
+        # deep -- which is exactly what broke `~/.sky/.runtime_files`, whose
+        # post-processing step copies out of the target directly.
+        contents_only = resolved.is_dir()
         buf = tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False)  # pylint: disable=consider-using-with
         try:
             with tarfile.open(buf.name, 'w:gz') as tar:
@@ -2196,14 +2247,17 @@ class ModalCommandRunner(CommandRunner):
                   timeout: Optional[int]) -> None:
         # pylint: disable-next=import-outside-toplevel
         from sky.provision.modal import modal_utils
+
         # Every remote path below is shlex.quote'd, so a leading `~` would
         # never reach a shell to expand and would create a literal `~` dir.
         target = modal_utils.abs_remote_path(target)
         resolved = pathlib.Path(source).expanduser()
-        # Mirror rsync: a file lands AT the target, a directory lands INSIDE
-        # it. The image bake uses the same rule, so the marker paths line up.
-        if resolved.is_dir() and not source.endswith('/'):
-            placed = f'{target.rstrip("/")}/{resolved.name}'
+        # Mirror how SkyPilot itself invokes rsync: a file lands AT the target,
+        # and a directory's CONTENTS land in the target (its wrapper always
+        # appends the trailing slash). The image bake uses the same rule, so
+        # the marker paths line up.
+        if resolved.is_dir():
+            placed = target
             dest_dir = target
         else:
             placed = target
