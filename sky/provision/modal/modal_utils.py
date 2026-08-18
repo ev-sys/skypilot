@@ -496,7 +496,7 @@ def get_app_tags(cluster_name_on_cloud: str,
 
 
 @functools.lru_cache(maxsize=1)
-def _modal_cli_argv() -> List[str]:
+def modal_cli_argv() -> List[str]:
     """Argv prefix for the Modal CLI, resolved without relying on ``PATH``.
 
     A bare ``['modal', ...]`` assumes the CLI is on ``PATH``, which is not safe:
@@ -516,7 +516,7 @@ def _modal_cli_argv() -> List[str]:
 
 def _run_modal_cli(args: List[str],
                    timeout: int = 180) -> subprocess.CompletedProcess:
-    argv = [*_modal_cli_argv(), *args]
+    argv = [*modal_cli_argv(), *args]
     try:
         return subprocess.run(argv,
                               capture_output=True,

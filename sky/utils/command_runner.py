@@ -2004,9 +2004,17 @@ class ModalCommandRunner(CommandRunner):
         return modal_utils.argv_budget()
 
     def _exec_argv(self, script: str) -> List[str]:
+        # pylint: disable-next=import-outside-toplevel
+        from sky.provision.modal import modal_utils
+        # NOT a bare 'modal': this is the transport for *every* command
+        # SkyPilot runs on a Modal node, and the API server frequently runs
+        # with a PATH that does not include the environment Modal was
+        # installed into. A bare argv there raises
+        # `FileNotFoundError: 'modal'` in `_internal_file_mounts`, failing the
+        # launch while the GPU container is already up and billing.
         return [
-            'modal', 'container', 'exec', self.container_id, '--no-pty', '--',
-            'bash', '-c', script
+            *modal_utils.modal_cli_argv(), 'container', 'exec',
+            self.container_id, '--no-pty', '--', 'bash', '-c', script
         ]
 
     def _check_argv_budget(self, script: str) -> None:
