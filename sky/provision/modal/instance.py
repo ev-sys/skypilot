@@ -38,8 +38,11 @@ Capability constraints, all reflected in ``sky/clouds/modal.py``
 * ``IMAGE_ID`` unsupported -- our prebake Named Image cannot ride SkyPilot's
   ``image_id`` field, so it travels as its own ``NamedImage`` node_config key
   and is resolved with ``Image.from_name()``.
-* ``SPOT_INSTANCE`` unsupported -- Modal candidates are on-demand only, which
-  the Server decorator enforces with ``nonpreemptible=True``.
+* ``SPOT_INSTANCE`` unsupported -- in the sense that spot cannot be *requested*,
+  not that nodes are on-demand. ``nonpreemptible=True`` is sent only for
+  CPU-only Servers; Modal rejects it for GPU workloads, and GPU Functions are
+  always preemptible with no way to opt out. So a GPU Modal node can be
+  reclaimed under SkyPilot without SkyPilot's spot-recovery machinery engaging.
 * ``AUTOSTOP`` / ``AUTO_TERMINATE`` unsupported -- ``max_lifetime_s`` is the
   ONLY teardown backstop, so ``terminate_instances`` correctness carries more
   weight here than on clouds with a platform-side sweeper.

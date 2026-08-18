@@ -11,11 +11,14 @@ warning. Verified against modal 1.5.3.
 """
 
 import base64
+import functools
 import hashlib
+import importlib.util
 import json
 import os
 import shlex
 import subprocess
+import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -301,9 +304,6 @@ def _make_server_class(app, image, node_config: Dict[str, Any],
         # that rolling-redeploy property while still pinning one warm node.
         # `target_concurrency` stays UNSET so the singleton does not autoscale.
         'min_containers': 1,
-        # SPOT_INSTANCE is an unsupported feature on this cloud, so Modal
-        # candidates must be on-demand only.
-        'nonpreemptible': True,
         # TODO(modal-auth): open endpoint. This is the current posture, not a
         # settled one -- proxy-token auth is the intended follow-up. Flagged
         # rather than shipped silently.
@@ -311,6 +311,26 @@ def _make_server_class(app, image, node_config: Dict[str, Any],
     }
     if node_config.get('Gpu'):
         kwargs['gpu'] = node_config['Gpu']
+    else:
+        # `nonpreemptible` is a CPU/memory-only knob. Modal rejects it outright
+        # for any GPU workload -- `InvalidError: Non-preemptible is not
+        # supported for GPU workloads` -- so sending it unconditionally failed
+        # 100% of GPU launches.
+        #
+        # This does NOT make GPU nodes on-demand. Modal GPU Functions are
+        # *always* preemptible and cannot be made otherwise: the docs state
+        # plainly that "the `nonpreemptible` parameter is not supported for GPU
+        # Functions", and the only on-demand lifecycle knob in the SDK
+        # (`modal.SchedulerPlacement(spot=False)` -> `_lifecycle='on-demand'`)
+        # is experimental and is not accepted by `@app.server()`, which exposes
+        # `nonpreemptible` alone. A Server is a Function, not a Sandbox, so the
+        # Sandbox carve-out ("not subject to preemption ... except where a gpu
+        # requirement is specified") does not apply either.
+        #
+        # SPOT_INSTANCE therefore stays unsupported in `sky/clouds/modal.py` in
+        # the sense that the *user cannot request* spot -- not in the sense that
+        # GPU nodes are on-demand. See the note in `instance.py`.
+        kwargs['nonpreemptible'] = True
     if node_config.get('Cpu') is not None:
         kwargs['cpu'] = node_config['Cpu']
     if node_config.get('Memory') is not None:
@@ -475,13 +495,42 @@ def get_app_tags(cluster_name_on_cloud: str,
 # ---------------------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=1)
+def _modal_cli_argv() -> List[str]:
+    """Argv prefix for the Modal CLI, resolved without relying on ``PATH``.
+
+    A bare ``['modal', ...]`` assumes the CLI is on ``PATH``, which is not safe:
+    the API server can run under a different environment than the one that
+    installed Modal. When that assumption breaks, ``subprocess.run`` raises
+    ``FileNotFoundError`` -- and on the teardown path that means a *leaked,
+    still-billing GPU container*, on the one path that must never fail.
+
+    ``modal`` ships a ``__main__``, so the interpreter that can already import
+    it can always invoke its CLI. Prefer that; fall back to ``PATH`` only when
+    the module is not importable here.
+    """
+    if importlib.util.find_spec('modal') is not None:
+        return [sys.executable, '-m', 'modal']
+    return ['modal']
+
+
 def _run_modal_cli(args: List[str],
                    timeout: int = 180) -> subprocess.CompletedProcess:
-    return subprocess.run(['modal', *args],
-                          capture_output=True,
-                          text=True,
-                          timeout=timeout,
-                          check=False)
+    argv = [*_modal_cli_argv(), *args]
+    try:
+        return subprocess.run(argv,
+                              capture_output=True,
+                              text=True,
+                              timeout=timeout,
+                              check=False)
+    except FileNotFoundError as e:
+        # Surface as a normal non-zero result so callers apply their own policy
+        # (``stop_app`` raises loudly; discovery degrades) instead of dying on
+        # an opaque OSError from deep inside teardown.
+        return subprocess.CompletedProcess(argv,
+                                           returncode=127,
+                                           stdout='',
+                                           stderr=f'Modal CLI not found: {e}')
 
 
 def list_container_ids(app_id: str) -> List[str]:
@@ -494,10 +543,20 @@ def list_container_ids(app_id: str) -> List[str]:
     """
     proc = _run_modal_cli(['container', 'list', '--app-id', app_id, '--json'])
     if proc.returncode != 0:
+        # An empty list here is indistinguishable from "all containers gone",
+        # which is how `wait_for_containers_gone` reads it. Say so loudly, so a
+        # still-billing container is never silently reported as torn down.
+        logger.warning(
+            f'Could not list containers for Modal app {app_id} '
+            f'(exit {proc.returncode}): {proc.stderr.strip()}. '
+            'Treating as empty; verify manually that nothing is still running.')
         return []
     try:
         rows = json.loads(proc.stdout or '[]')
     except json.JSONDecodeError:
+        logger.warning(
+            f'Unparseable container list for Modal app {app_id}; treating as '
+            'empty. Verify manually that nothing is still running.')
         return []
     return [r['container_id'] for r in rows if r.get('container_id')]
 
