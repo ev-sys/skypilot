@@ -3,6 +3,7 @@
 from sky.provision.modal.config import bootstrap_instances
 from sky.provision.modal.instance import cleanup_ports
 from sky.provision.modal.instance import get_cluster_info
+from sky.provision.modal.instance import get_command_runners
 from sky.provision.modal.instance import open_ports
 from sky.provision.modal.instance import query_instances
 from sky.provision.modal.instance import query_ports
@@ -23,6 +24,7 @@ __all__ = [
     'delete_volume',
     'get_all_volumes_usedby',
     'get_cluster_info',
+    'get_command_runners',
     'get_volume_usedby',
     'map_all_volumes_usedby',
     'open_ports',

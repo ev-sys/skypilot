@@ -21,15 +21,41 @@ available_node_types:
     resources: {}
     node_config:
       InstanceType: {{instance_type}}
-      PublicKey: |-
-        skypilot:ssh_public_key_content
-      ModalRegion: {% if modal_region is none %}null{% else %}"{{modal_region}}"{% endif %}
+      # No PublicKey: a Modal Server has no SSH. Commands travel over
+      # `modal container exec` (see ModalCommandRunner).
+      ComputeRegion: {% if modal_region is none %}null{% else %}"{{modal_region}}"{% endif %}
+      RoutingRegion: {% if modal_routing_region is none %}null{% else %}"{{modal_routing_region}}"{% endif %}
       Gpu: {% if modal_gpu is none %}null{% else %}"{{modal_gpu}}"{% endif %}
       Cpu: {{modal_cpu}}
       Memory: {{modal_memory}}
-      Timeout: {{modal_timeout}}
-      IdleTimeout: {% if modal_idle_timeout is none %}null{% else %}{{modal_idle_timeout}}{% endif %}
+      Port: {{modal_port}}
+      # Generous on purpose. Modal's health check is TCP-level, so a warming
+      # listener would report healthy while the workload is absent and blind
+      # the platform watchdog -- the very thing Servers were chosen for. We
+      # wait for the REAL workload instead, which means this must cover the
+      # cold-SETUP case: ~100s when the prebake sentinel pin matches, ~10 min
+      # cold. The value below leaves margin on top of the cold case.
+      StartupTimeout: {{modal_startup_timeout}}
+      # AUTOSTOP/AUTO_TERMINATE are unsupported on Modal, so this deadline is
+      # the only teardown backstop the cluster carries.
+      MaxLifetimeSeconds: {% if modal_max_lifetime_s is none %}null{% else %}{{modal_max_lifetime_s}}{% endif %}
+      # A Modal Named Image (e.g. evsys-train:42f3d44). It cannot ride
+      # SkyPilot's image_id field because IMAGE_ID is unsupported on this
+      # cloud, so it travels here and is resolved with Image.from_name().
+      NamedImage: {% if modal_named_image is none %}null{% else %}"{{modal_named_image}}"{% endif %}
       DockerImage: {% if modal_docker_image is none %}null{% else %}"{{modal_docker_image}}"{% endif %}
+      # Baked into the image at provision time rather than pushed after boot:
+      # `modal container exec` carries no stdin and caps argv near 8 KB, so it
+      # cannot move a multi-MB wheel. Mirrors the file_mounts block below.
+      FileMounts:
+        - RemotePath: "{{sky_ray_yaml_remote_path}}"
+          LocalPath: "{{sky_ray_yaml_local_path}}"
+        - RemotePath: "{{sky_remote_path}}/{{sky_wheel_hash}}"
+          LocalPath: "{{sky_local_path}}"
+{%- for remote_path, local_path in credentials.items() %}
+        - RemotePath: "{{remote_path}}"
+          LocalPath: "{{local_path}}"
+{%- endfor %}
       ModalVolumes:
 {%- if modal_volume_mounts %}
 {%- for volume_mount in modal_volume_mounts %}

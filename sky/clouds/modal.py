@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 from sky import catalog
 from sky import clouds
 from sky import exceptions
+from sky import skypilot_config
 from sky.adaptors import modal as modal_adaptor
 from sky.utils import annotations
 from sky.utils import common_utils
@@ -23,18 +24,31 @@ _CREDENTIAL_FILE = '~/.modal.toml'
 _TOKEN_ID_ENV_VAR = 'MODAL_TOKEN_ID'
 _TOKEN_SECRET_ENV_VAR = 'MODAL_TOKEN_SECRET'
 _AUTO_REGION = 'auto'
+_DEFAULT_PORT = 8000
+# Modal's health check is TCP-level, so we cannot park a warming listener on
+# the port to buy time -- that would report healthy while the workload is
+# absent and blind the watchdog. Instead we wait for the real workload and make
+# the budget generous: a prebaked image reaches SETUP in ~100s, a cold one in
+# ~10 min. 30 min leaves margin over the cold case.
+_DEFAULT_STARTUP_TIMEOUT_S = 30 * 60
 
 
 @registry.CLOUD_REGISTRY.register
 class Modal(clouds.Cloud):
-    """Modal Sandbox cloud."""
+    """Modal cloud, backed by Modal Servers.
+
+    A cluster is one deployed Modal App holding one ``@app.server()`` Server;
+    its single container is the node, reached with ``modal container exec``
+    rather than SSH. See ``sky/provision/modal/instance.py`` for the full
+    rationale, including why a stable Server URL is not stable node state.
+    """
 
     _REPR = 'Modal'
     _MAX_CLUSTER_NAME_LEN_LIMIT = 60
     # yapf: disable
     _CLOUD_UNSUPPORTED_FEATURES = {
         clouds.CloudImplementationFeatures.STOP:
-            'Stopping Modal Sandboxes is not supported; use down instead.',
+            'Stopping a Modal Server is not supported; use down instead.',
         clouds.CloudImplementationFeatures.MULTI_NODE:
             'Multi-node Modal clusters are not supported yet.',
         clouds.CloudImplementationFeatures.CLONE_DISK_FROM_CLUSTER:
@@ -253,17 +267,32 @@ class Modal(clouds.Cloud):
                         or modal_environment_name,
                     'SubPath': volume_mount.sub_path,
                 })
+        # These ride `~/.sky/config.yaml` under the `modal` cloud rather than
+        # the task YAML: the fleet deliberately adds no new task-YAML surface.
+        # `named_image` in particular CANNOT use `resources.image_id`, because
+        # IMAGE_ID is an unsupported feature on this cloud.
+        def _modal_config(key: str, default: Any) -> Any:
+            return skypilot_config.get_effective_region_config(
+                cloud='modal',
+                region=region.name,
+                keys=(key,),
+                default_value=default)
+
         return {
             'instance_type': resources.instance_type,
             'custom_resources': custom_resources,
             'region': region.name,
             'modal_environment_name': modal_environment_name,
             'modal_region': modal_region,
+            'modal_routing_region': _modal_config('routing_region', None),
             'modal_gpu': modal_gpu,
             'modal_cpu': modal_cpu,
             'modal_memory': modal_memory,
-            'modal_timeout': 24 * 60 * 60,
-            'modal_idle_timeout': None,
+            'modal_port': _modal_config('port', _DEFAULT_PORT),
+            'modal_startup_timeout': _modal_config('startup_timeout',
+                                                   _DEFAULT_STARTUP_TIMEOUT_S),
+            'modal_max_lifetime_s': _modal_config('max_lifetime_s', None),
+            'modal_named_image': _modal_config('named_image', None),
             'modal_docker_image': resources.extract_docker_image(),
             'modal_volume_mounts': modal_volume_mounts,
         }
