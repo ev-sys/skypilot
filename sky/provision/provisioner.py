@@ -507,7 +507,14 @@ def _post_provision_setup(
         is_k8s_cloud = cloud_name.lower(
         ) in provision_constants.K8S_BASED_CLOUDS
         is_slurm_cloud = cloud_name.lower() == 'slurm'
-        if not is_k8s_cloud and not is_slurm_cloud:
+        # Modal is SSH-less for the same reason: a Modal Server is reached by
+        # `modal container exec` through ModalCommandRunner, and its
+        # InstanceInfo deliberately carries `ssh_port=None`. Probing SSH here
+        # builds `ssh ... -p None`, which fails instantly with "Bad port
+        # 'None'" and then retries for the full 600s timeout -- failing the
+        # launch while the GPU container is already up and billing.
+        is_modal_cloud = cloud_name.lower() == 'modal'
+        if not is_k8s_cloud and not is_slurm_cloud and not is_modal_cloud:
             logger.debug(
                 f'\nWaiting for SSH to be available for {cluster_name!r} ...')
             wait_for_ssh(cluster_info, ssh_credentials)
