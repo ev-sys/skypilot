@@ -1530,6 +1530,32 @@ _CONTAINER_MOUNTS_SCHEMA = {
     },
 }
 
+# Modal rides `~/.sky/config.yaml` under the `modal` cloud rather than the task
+# YAML: the fleet deliberately adds no new task-YAML surface, and `named_image`
+# in particular cannot use `resources.image_id` because IMAGE_ID is an
+# unsupported feature on this cloud. Read by `sky/clouds/modal.py` via
+# `get_effective_region_config`, hence the same properties are accepted both at
+# the top level and per-region under `region_configs`.
+_MODAL_CLOUD_PROPERTIES = {
+    'routing_region': {
+        'type': 'string',
+    },
+    'port': {
+        'type': 'integer',
+    },
+    'startup_timeout': {
+        'type': 'integer',
+    },
+    # The ONLY teardown backstop on this cloud: AUTOSTOP and AUTO_TERMINATE are
+    # both unsupported, so without this nothing platform-side ends billing.
+    'max_lifetime_s': {
+        'type': 'integer',
+    },
+    'named_image': {
+        'type': 'string',
+    },
+}
+
 _PRICING_SCHEMA = {
     'type': 'object',
     'required': [],
@@ -2285,6 +2311,27 @@ def get_config_schema():
                     }
                 }
             },
+        },
+        'modal': {
+            'type': 'object',
+            'required': [],
+            'additionalProperties': False,
+            'properties': {
+                **_MODAL_CLOUD_PROPERTIES,
+                'region_configs': {
+                    'type': 'object',
+                    'required': [],
+                    'properties': {},
+                    'additionalProperties': {
+                        'type': 'object',
+                        'required': [],
+                        'additionalProperties': False,
+                        'properties': {
+                            **_MODAL_CLOUD_PROPERTIES,
+                        },
+                    }
+                },
+            }
         }
     }
 
