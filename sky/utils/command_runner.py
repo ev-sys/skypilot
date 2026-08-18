@@ -2188,6 +2188,9 @@ class ModalCommandRunner(CommandRunner):
                   timeout: Optional[int]) -> None:
         # pylint: disable-next=import-outside-toplevel
         from sky.provision.modal import modal_utils
+        # Every remote path below is shlex.quote'd, so a leading `~` would
+        # never reach a shell to expand and would create a literal `~` dir.
+        target = modal_utils.abs_remote_path(target)
         resolved = pathlib.Path(source).expanduser()
         # Mirror rsync: a file lands AT the target, a directory lands INSIDE
         # it. The image bake uses the same rule, so the marker paths line up.
@@ -2242,6 +2245,9 @@ class ModalCommandRunner(CommandRunner):
 
     def _rsync_down(self, source: str, target: str,
                     timeout: Optional[int]) -> None:
+        # pylint: disable-next=import-outside-toplevel
+        from sky.provision.modal import modal_utils
+        source = modal_utils.abs_remote_path(source)
         staging = f'/tmp/.sky_down_{uuid.uuid4().hex}'
         rc, out = self._exec_checked(
             f'set -e; tar czf {staging}.tgz -C '

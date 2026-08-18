@@ -142,8 +142,10 @@ def build_image(named_image: Optional[str], docker_image: Optional[str],
         # Mirror rsync's placement exactly, because SkyPilot will later run the
         # equivalent rsync against these same pairs and must find them already
         # in place: a file lands AT the target, a directory lands INSIDE it.
+        remote_path = abs_remote_path(remote_path)
         if os.path.isdir(local_path):
-            dest = f'{remote_path.rstrip("/")}/{os.path.basename(local_path.rstrip("/"))}'
+            dest = (f'{remote_path.rstrip("/")}/'
+                    f'{os.path.basename(local_path.rstrip("/"))}')
             image = image.add_local_dir(local_path, dest, copy=True)
         else:
             dest = remote_path
@@ -163,9 +165,27 @@ def build_image(named_image: Optional[str], docker_image: Optional[str],
     return image
 
 
+#: The container runs as root, so ``~`` is ``/root``. Two things force us to
+#: expand it ourselves rather than let a shell do it: Modal's
+#: ``add_local_dir``/``add_local_file`` reject a non-absolute ``remote_path``
+#: outright, and every path this module puts in a command is ``shlex.quote``d,
+#: which stops the remote shell expanding a leading ``~`` and would silently
+#: create a directory literally named ``~``.
+REMOTE_HOME = '/root'
+
+
+def abs_remote_path(path: str) -> str:
+    """Expand a leading ``~`` against the container's home."""
+    if path == '~':
+        return REMOTE_HOME
+    if path.startswith('~/'):
+        return f'{REMOTE_HOME}/{path[2:]}'
+    return path
+
+
 def marker_path(remote_path: str) -> str:
     """Path of the sync marker that records what content is already present."""
-    return f'{remote_path.rstrip("/")}.sky_modal_sync'
+    return f'{abs_remote_path(remote_path).rstrip("/")}.sky_modal_sync'
 
 
 def content_digest(local_path: str) -> str:
