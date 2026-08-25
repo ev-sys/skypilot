@@ -353,6 +353,7 @@ def _get_cluster_config_template(cloud):
         clouds.Seeweb: 'seeweb-ray.yml.j2',
         clouds.Yotta: 'yotta-ray.yml.j2',
         clouds.Mithril: 'mithril-ray.yml.j2',
+        clouds.Daytona: 'daytona-ray.yml.j2',
         clouds.Modal: 'modal-ray.yml.j2',
         clouds.Verda: 'verda-ray.yml.j2',
     }
@@ -6753,7 +6754,11 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         if not storage_mounts:
             return
 
-        if isinstance(handle.launched_resources.cloud, clouds.Modal):
+        # STORAGE_MOUNTING is an unsupported feature on both of these
+        # clouds: a sandbox/container node has no FUSE mount to hang a
+        # bucket off. Returning here beats failing after provisioning.
+        if isinstance(handle.launched_resources.cloud,
+                      (clouds.Modal, clouds.Daytona)):
             return
         start = time.time()
         runners = handle.get_command_runners()

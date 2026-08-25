@@ -1,0 +1,106 @@
+cluster_name: {{cluster_name_on_cloud}}
+
+# A Daytona sandbox is ONE container, so a cluster is one node. `H100:2` is two
+# GPUs on that node, never two nodes.
+max_workers: 0
+upscaling_speed: 0
+idle_timeout_minutes: 60
+
+provider:
+  type: external
+  module: sky.provision.daytona
+  region: "{{region}}"
+  # Re-minted on every get_cluster_info(): Daytona SSH tokens expire, and a
+  # token taken once at provision would strand the cluster when it aged out.
+  ssh_access_minutes: {{daytona_ssh_access_minutes}}
+  disable_launch_config_check: true
+
+auth:
+  # Overridden at runtime by ClusterInfo.ssh_user, which carries a freshly
+  # minted Daytona SSH access token -- the gateway authenticates by putting the
+  # token in the USERNAME position, not by key. The identity file below is
+  # still passed by SkyPilot and simply ignored by the gateway.
+  ssh_user: root
+  ssh_private_key: {{ssh_private_key}}
+
+available_node_types:
+  ray_head_default:
+    resources: {}
+    node_config:
+      InstanceType: {{instance_type}}
+      PublicKey: |-
+        skypilot:ssh_public_key_content
+      Region: "{{region}}"
+      GpuType: {% if daytona_gpu_type is none %}null{% else %}"{{daytona_gpu_type}}"{% endif %}
+      Gpu: {{daytona_gpu}}
+      Cpu: {{daytona_cpu}}
+      Memory: {{daytona_memory}}
+      Disk: {{daytona_disk}}
+      # Real preemptible GPU capacity, unlike Modal. No warning and no webhook
+      # on eviction; `spotEvictedAt` on the corpse is the only signal, and it
+      # is what query_instances reports as the failure reason.
+      UseSpot: {{daytona_use_spot}}
+      # POST /sandbox has NO `image` field -- sending one is ignored, the
+      # platform falls back to its default snapshot, and the request then 400s
+      # for "specifying resources with a snapshot". The image travels as a
+      # one-line build context; see daytona_utils.create_sandbox.
+      DefaultImage: "{{daytona_image}}"
+      DockerImage: {% if daytona_image is none %}null{% else %}"{{daytona_image}}"{% endif %}
+      Snapshot: {% if daytona_snapshot is none %}null{% else %}"{{daytona_snapshot}}"{% endif %}
+      # Daytona restricts RUNTIME egress to an essential-domains list on
+      # lower org tiers, and setting this REPLACES that list rather than
+      # extending it -- so it must name everything SETUP needs. null uses
+      # the provisioner's default; [] disables the list entirely (Tier 3/4).
+      DomainAllowList: {% if daytona_domain_allow_list is none %}null{% else %}{{daytona_domain_allow_list}}{% endif %}
+      StartupTimeout: {{daytona_startup_timeout}}
+      # AUTOSTOP/AUTO_TERMINATE are unsupported on this cloud, so this
+      # server-side wall-clock deadline is the teardown that survives the API
+      # server dying. Daytona enforces it regardless of sandbox state.
+      TtlMinutes: {{daytona_ttl_minutes}}
+
+head_node_type: ray_head_default
+
+# Format: `REMOTE_PATH : LOCAL_PATH`
+file_mounts: {
+  "{{sky_ray_yaml_remote_path}}": "{{sky_ray_yaml_local_path}}",
+  "{{sky_remote_path}}/{{sky_wheel_hash}}": "{{sky_local_path}}",
+  "~/.ssh/sky-cluster-key": "{{ssh_private_key}}",
+{%- for remote_path, local_path in credentials.items() %}
+  "{{remote_path}}": "{{local_path}}",
+{%- endfor %}
+}
+
+rsync_exclude: []
+
+initialization_commands: []
+
+# List of shell commands to run to set up nodes.
+# NOTE: these are very performance-sensitive. Each new item opens/closes an SSH
+# connection, which is expensive. Try your best to co-locate commands into fewer
+# items!
+#
+# Increment the following for catching performance bugs easier:
+#   current num items (num SSH connections): 1
+setup_commands:
+  - {%- for initial_setup_command in initial_setup_commands %}
+    {{ initial_setup_command }}
+    {%- endfor %}
+    sudo systemctl stop unattended-upgrades || true;
+    sudo systemctl disable unattended-upgrades || true;
+    sudo sed -i 's/Unattended-Upgrade "1"/Unattended-Upgrade "0"/g' /etc/apt/apt.conf.d/20auto-upgrades || true;
+    sudo kill -9 `sudo lsof /var/lib/dpkg/lock-frontend | awk '{print $2}' | tail -n 1` || true;
+    sudo pkill -9 apt-get;
+    sudo pkill -9 dpkg;
+    sudo dpkg --configure -a;
+    mkdir -p ~/.ssh; touch ~/.ssh/config;
+    which patch > /dev/null || sudo apt install -y patch;
+    {{ conda_installation_commands }}
+    {{ uv_installation_commands }}
+    {{ ray_skypilot_installation_commands }}
+    {{ copy_skypilot_templates_commands }}
+    touch ~/.sudo_as_admin_successful;
+    sudo bash -c 'rm -rf /etc/security/limits.d; echo "* soft nofile 1048576" >> /etc/security/limits.conf; echo "* hard nofile 1048576" >> /etc/security/limits.conf';
+    mkdir -p ~/.ssh; (grep -Pzo -q "Host \*\n  StrictHostKeyChecking no\n  IdentityFile ~/.ssh/id_ed25519\n  IdentityFile ~/.ssh/id_ecdsa\n  IdentityFile ~/.ssh/id_rsa\n  IdentityFile ~/.ssh/sky-cluster-key" ~/.ssh/config) || printf "Host *\n  StrictHostKeyChecking no\n  IdentityFile ~/.ssh/id_ed25519\n  IdentityFile ~/.ssh/id_ecdsa\n  IdentityFile ~/.ssh/id_rsa\n  IdentityFile ~/.ssh/sky-cluster-key\n" >> ~/.ssh/config;
+    {{ ssh_max_sessions_config }}
+
+# Command to start ray clusters are now placed in `sky.provision.instance_setup`.

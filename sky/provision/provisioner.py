@@ -513,8 +513,17 @@ def _post_provision_setup(
         # builds `ssh ... -p None`, which fails instantly with "Bad port
         # 'None'" and then retries for the full 600s timeout -- failing the
         # launch while the GPU container is already up and billing.
+        # Daytona is SSH-less by CHOICE, not by limitation: it has an SSH
+        # gateway, but on port 22, which a locked agent sandbox's egress proxy
+        # blocks -- so the provisioner talks HTTPS only and its InstanceInfo
+        # carries `ssh_port=None` like Modal's. Probing SSH here builds
+        # `ssh ... -p None`, which fails instantly with "Bad port 'None'" and
+        # then retries for the full 600s timeout, failing the launch while the
+        # GPU sandbox is already up and billing.
         is_modal_cloud = cloud_name.lower() == 'modal'
-        if not is_k8s_cloud and not is_slurm_cloud and not is_modal_cloud:
+        is_daytona_cloud = cloud_name.lower() == 'daytona'
+        if (not is_k8s_cloud and not is_slurm_cloud and not is_modal_cloud and
+                not is_daytona_cloud):
             logger.debug(
                 f'\nWaiting for SSH to be available for {cluster_name!r} ...')
             wait_for_ssh(cluster_info, ssh_credentials)

@@ -1930,6 +1930,265 @@ class KubernetesCommandRunner(CommandRunner):
             timeout=timeout)
 
 
+class DaytonaCommandRunner(CommandRunner):
+    """Runner for commands on a Daytona sandbox, over HTTPS only.
+
+    Daytona *does* have SSH -- ``POST /sandbox/{id}/ssh-access`` mints a token
+    and ``ssh <token>@ssh.app.daytona.io`` connects. It is deliberately not
+    used. Port 22 is blocked by the egress proxy of a locked agent sandbox,
+    which is exactly what stops SkyPilot renting Verda from inside one. Every
+    call this runner makes is HTTPS to ``app.daytona.io`` /
+    ``proxy.app.daytona.io``, so a sandboxed agent can rent Daytona GPUs on the
+    same terms it rents Modal.
+
+    Measured properties of ``POST /toolbox/{id}/process/execute`` (live,
+    2026-08-25 -- every one of these is the opposite of the Modal exec channel,
+    which is why this runner is a third the size of ``ModalCommandRunner``):
+
+    1. **No argv cap.** A 1,000,000-byte command ran correctly. Modal fails
+       SILENTLY (rc=0, empty output) somewhere past 8 KB, which is what forced
+       its base64 chunking and script staging.
+    2. **No output truncation.** 1,000,000 bytes of stdout came back whole.
+       Modal truncates at 8192 characters via a drain race.
+    3. **Exit codes propagate** (``exit 42`` -> ``exitCode: 42``).
+    4. **``cwd`` and ``envs`` are honoured** as request fields.
+    5. **stderr is MERGED into stdout.** ``echo E >&2`` arrives in ``result``.
+       There is no flag to separate them, so ``separate_stderr=True`` cannot be
+       honoured -- the split is already gone before this process sees it. This
+       is the one property shared with Modal.
+
+    File transfer does **not** go over the command channel at all. Daytona has
+    real binary-safe file endpoints (``POST /files/upload``,
+    ``GET /files/download``; verified with a 3 MiB random blob, sha256 matching
+    in both directions), so :meth:`rsync` uploads a file straight to its
+    destination path and a directory as one tarball. That sidesteps the class
+    of bug that comes from reconstructing a destination out of an archive
+    member name (see ``ev-sys/skypilot#4``): for a file, the destination is
+    passed to the API as the literal target path and no name is ever inferred.
+    """
+
+    #: Generous but not unbounded. 1 MB was measured working; this leaves a
+    #: wide margin under it rather than probing the real ceiling on every call.
+    _MAX_INLINE_COMMAND_BYTES = 512 * 1024
+
+    def __init__(self, node: Tuple[str, str], **kwargs):
+        """``node`` is ``(sandbox_id, region)``."""
+        del kwargs
+        super().__init__(node)
+        self.sandbox_id, self.region = node
+
+    @property
+    def node_id(self) -> str:
+        # One sandbox is one container, so `H100:2` is two GPUs on ONE node.
+        # Keying identity on the sandbox makes that explicit and gives the
+        # pools model a single stable node id per cluster.
+        return f'daytona-{self.sandbox_id}'
+
+    def _inline_command_quote_levels(self) -> int:
+        # The command is delivered as a JSON string and handed to one remote
+        # shell; only that shell's quoting survives.
+        return 1
+
+    def max_inline_command_length(self) -> int:
+        return self._MAX_INLINE_COMMAND_BYTES
+
+    def _exec(self,
+              script: str,
+              timeout: Optional[int] = None) -> Tuple[int, str]:
+        """Run a script in the sandbox -> ``(returncode, merged_output)``."""
+        # pylint: disable-next=import-outside-toplevel
+        from sky.provision.daytona import daytona_utils
+        return daytona_utils.exec_command(self.sandbox_id,
+                                          script,
+                                          timeout_s=timeout)
+
+    @timeline.event
+    @context_utils.cancellation_guard
+    def run(
+            self,
+            cmd: Union[str, List[str]],
+            *,
+            port_forward: Optional[List[int]] = None,
+            require_outputs: bool = False,
+            # Advanced options.
+            log_path: str = os.devnull,
+            process_stream: bool = True,
+            stream_logs: bool = True,
+            ssh_mode: SshMode = SshMode.NON_INTERACTIVE,
+            separate_stderr: bool = False,
+            connect_timeout: Optional[int] = None,
+            source_bashrc: bool = False,
+            skip_num_lines: int = 0,
+            run_in_background: bool = False,
+            **kwargs) -> Union[int, Tuple[int, str, str]]:
+        """Run ``cmd`` in the sandbox via the toolbox exec endpoint."""
+        del port_forward, connect_timeout, ssh_mode, kwargs  # unused
+        if separate_stderr:
+            # Not a shortcut: the toolbox merges the sandbox's stderr into the
+            # response body, so the split is gone before we see it.
+            logger.debug('Daytona exec cannot separate stderr from stdout; '
+                         'returning the merged stream as stdout.')
+
+        command_str = self._get_command_to_run(
+            cmd,
+            process_stream,
+            separate_stderr=True,
+            skip_num_lines=skip_num_lines,
+            source_bashrc=source_bashrc,
+            run_in_background=run_in_background)
+
+        returncode, output = self._exec(command_str)
+
+        if log_path != os.devnull:
+            log_dir = os.path.expanduser(os.path.dirname(log_path))
+            os.makedirs(log_dir, exist_ok=True)
+            with open(os.path.expanduser(log_path), 'a', encoding='utf-8') as f:
+                f.write(output)
+        if stream_logs and process_stream:
+            for line in output.splitlines():
+                logger.info(line)
+
+        if require_outputs:
+            return returncode, output, ''
+        return returncode
+
+    @timeline.event
+    def rsync(
+        self,
+        source: str,
+        target: str,
+        *,
+        up: bool,
+        log_path: str = os.devnull,
+        stream_logs: bool = True,
+        max_retry: int = 1,
+        timeout: Optional[int] = None,
+    ) -> None:
+        """Move files with Daytona's file API rather than rsync's protocol.
+
+        A **file** is uploaded straight to its destination path: the API takes
+        the target as a parameter, so no destination is ever reconstructed from
+        an archive member name. A **directory** travels as one tarball
+        extracted with ``tar -C <target>``, matching how SkyPilot invokes rsync
+        everywhere else (its wrapper appends a trailing slash to every
+        directory source, so a directory's *contents* land in the target).
+        """
+        del stream_logs, max_retry, log_path  # the exec layer handles these
+        if up:
+            self._rsync_up(source, target, timeout)
+        else:
+            self._rsync_down(source, target, timeout)
+
+    def _rsync_up(self, source: str, target: str,
+                  timeout: Optional[int]) -> None:
+        # pylint: disable-next=import-outside-toplevel
+        from sky.provision.daytona import daytona_utils
+        resolved = pathlib.Path(source).expanduser()
+        remote = daytona_utils.abs_remote_path(target)
+        if not resolved.exists():
+            raise exceptions.CommandError(
+                1, f'rsync {source} -> {target}',
+                f'Local path {resolved} does not exist.', None)
+
+        if resolved.is_file():
+            # Straight to the destination path. THIS is why a file cannot land
+            # under a stale temp name: the destination is what we send, not
+            # something derived from the source's basename.
+            parent = str(pathlib.PurePosixPath(remote).parent)
+            rc, out = self._exec(f'mkdir -p {shlex.quote(parent)}',
+                                 timeout=timeout)
+            if rc != 0:
+                raise exceptions.CommandError(
+                    rc, f'rsync {source} -> {target}',
+                    f'Could not create {parent}: {out}', None)
+            daytona_utils.upload_file(self.sandbox_id, str(resolved), remote)
+            return
+
+        # Directory: one tarball of its CONTENTS, extracted into the target.
+        # pylint: disable-next=import-outside-toplevel
+        import tarfile
+        staging = f'/tmp/.sky_up_{uuid.uuid4().hex}.tar.gz'
+        buf = tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False)  # pylint: disable=consider-using-with
+        try:
+            with tarfile.open(buf.name, 'w:gz') as tar:
+                for child in sorted(resolved.iterdir()):
+                    tar.add(str(child), arcname=child.name)
+            daytona_utils.upload_file(self.sandbox_id, buf.name, staging)
+        finally:
+            os.unlink(buf.name)
+        rc, out = self._exec(
+            f'mkdir -p {shlex.quote(remote)} && '
+            f'tar xzf {shlex.quote(staging)} -C {shlex.quote(remote)} && '
+            f'rm -f {shlex.quote(staging)}',
+            timeout=timeout)
+        if rc != 0:
+            raise exceptions.CommandError(
+                rc, f'rsync {source} -> {target}',
+                f'Failed to unpack the uploaded archive: {out}', None)
+
+    def _rsync_down(self, source: str, target: str,
+                    timeout: Optional[int]) -> None:
+        # pylint: disable-next=import-outside-toplevel
+        from sky.provision.daytona import daytona_utils
+        remote = daytona_utils.abs_remote_path(source)
+        local = pathlib.Path(target).expanduser()
+
+        rc, out = self._exec(
+            f'test -d {shlex.quote(remote)} && echo DIR || echo FILE',
+            timeout=timeout)
+        if rc != 0:
+            raise exceptions.CommandError(
+                rc, f'rsync {source} -> {target}',
+                f'Could not stat {remote}: {out}', None)
+        is_dir = 'DIR' in out
+
+        if not is_dir:
+            local.parent.mkdir(parents=True, exist_ok=True)
+            data = daytona_utils.download_file(self.sandbox_id, remote)
+            local.write_bytes(data)
+            return
+
+        staging = f'/tmp/.sky_down_{uuid.uuid4().hex}.tar.gz'
+        rc, out = self._exec(
+            f'tar czf {shlex.quote(staging)} -C {shlex.quote(remote)} .',
+            timeout=timeout)
+        if rc != 0:
+            raise exceptions.CommandError(
+                rc, f'rsync {source} -> {target}',
+                f'Failed to archive {remote}: {out}', None)
+        data = daytona_utils.download_file(self.sandbox_id, staging)
+        self._exec(f'rm -f {shlex.quote(staging)}', timeout=timeout)
+        # pylint: disable-next=import-outside-toplevel
+        import tarfile
+        local.mkdir(parents=True, exist_ok=True)
+        buf = tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False)  # pylint: disable=consider-using-with
+        try:
+            buf.write(data)
+            buf.close()
+            with tarfile.open(buf.name, 'r:gz') as tar:
+                tar.extractall(str(local))
+        finally:
+            os.unlink(buf.name)
+
+    def check_connection(self) -> bool:
+        try:
+            rc, _ = self._exec('true', timeout=60)
+            return rc == 0
+        except Exception:  # pylint: disable=broad-except
+            return False
+
+    def port_forward_command(
+            self,
+            port_forward: List[Tuple[int, int]],
+            connect_timeout: int = 1) -> List[str]:
+        del port_forward, connect_timeout  # unused
+        raise NotImplementedError(
+            'Daytona has no SSH tunnel to forward a port through. A port '
+            'served inside the sandbox is reached at its authenticated '
+            'preview URL instead (https://{port}-{sandboxId}.{proxyDomain} '
+            'with an x-daytona-preview-token header).')
+
+
 class ModalCommandRunner(CommandRunner):
     """Runner for commands on a Modal Server container.
 
