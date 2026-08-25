@@ -395,15 +395,22 @@ def query_ports(
     head_ip: Optional[str] = None,
     provider_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[int, List[common.Endpoint]]:
-    """Report each requested port's preview URL.
+    """Report each requested port as a **signed** preview URL.
 
-    These URLs are **authenticated**: a caller needs an
-    ``x-daytona-preview-token`` header unless the sandbox is public. SkyPilot's
-    endpoint model has nowhere to put that header, so the URL alone is not
-    sufficient to reach the port -- see ``sky/clouds/daytona.py`` for the note
-    that goes in front of users.
+    Daytona has no public per-node IP; a served port is reached through its
+    preview proxy. The ordinary preview URL carries its token in an
+    ``x-daytona-preview-token`` header, and SkyPilot's endpoint model has
+    nowhere to put one -- nor does the client on the other end (the ``tinker``
+    client that talks to a SkyRL server takes a base URL and nothing else).
+
+    A **signed** preview URL embeds the token in the URL itself, so the
+    endpoint SkyPilot hands back is directly usable. That is the whole reason
+    this cloud can serve at all. Falls back to the header-gated URL when
+    signing is unavailable, so ``sky status --endpoint`` still shows something
+    true rather than nothing.
     """
-    del head_ip, provider_config  # unused
+    del head_ip  # unused
+    expires = int((provider_config or {}).get('signed_url_seconds') or 86400)
     sandboxes = daytona_utils.find_sandboxes(cluster_name_on_cloud)
     head = _head_of(sandboxes)
     if head is None:
@@ -412,10 +419,15 @@ def query_ports(
     out: Dict[int, List[common.Endpoint]] = {}
     for port in sorted(resources_utils.port_ranges_to_set(ports)):
         try:
-            url, _ = daytona_utils.preview_url(head, int(port))
+            url = daytona_utils.signed_preview_url(head, int(port), expires)
         except daytona_utils.DaytonaError as e:
-            logger.debug(f'No Daytona preview URL for port {port}: {e}')
-            continue
+            logger.debug(f'No signed preview URL for port {port} ({e}); '
+                         'falling back to the header-gated one.')
+            try:
+                url, _ = daytona_utils.preview_url(head, int(port))
+            except daytona_utils.DaytonaError as e2:
+                logger.debug(f'No Daytona preview URL for port {port}: {e2}')
+                continue
         parsed = urllib.parse.urlparse(url)
         if parsed.hostname is None:
             continue

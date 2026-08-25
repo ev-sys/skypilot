@@ -13,6 +13,10 @@ provider:
   # Re-minted on every get_cluster_info(): Daytona SSH tokens expire, and a
   # token taken once at provision would strand the cluster when it aged out.
   ssh_access_minutes: {{daytona_ssh_access_minutes}}
+  # Lifetime of the SIGNED preview URL query_ports hands back. The token is
+  # in the URL (no header), which is the only shape an ordinary client -- the
+  # tinker client included -- can actually use.
+  signed_url_seconds: {{daytona_signed_url_seconds}}
   disable_launch_config_check: true
 
 auth:

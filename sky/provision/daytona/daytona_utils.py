@@ -602,6 +602,36 @@ def create_ssh_access(sandbox_id: str, expires_in_minutes: int) -> str:
     return str(token)
 
 
+def signed_preview_url(sandbox_id: str, port: int,
+                       expires_in_seconds: int) -> str:
+    """A preview URL with the token **embedded in the URL**, not a header.
+
+    This is what makes a served port usable by an ordinary HTTP client.
+    :func:`preview_url` returns a URL plus a token that must travel in an
+    ``x-daytona-preview-token`` header, and most clients cannot be told to add
+    one -- the ``tinker`` client that talks to a SkyRL server certainly cannot,
+    it just takes a base URL. A signed URL
+    (``https://{port}-{token}.{proxyDomain}``) needs no headers at all, which
+    is why SkyPilot's endpoint for this cloud is the signed one.
+
+    The two token kinds are **not interchangeable**: a standard preview token
+    cannot be used in a signed URL and vice versa.
+
+    Security note, because this trades one property for another: anyone
+    holding the URL can reach the port until the token expires, and SkyRL
+    performs no authentication of its own. Hence an explicit, bounded expiry
+    -- Daytona's default is 60 seconds, deliberately short, and the docs say
+    to always set this rather than inherit it.
+    """
+    got = _request(
+        'GET', f'sandbox/{sandbox_id}/ports/{int(port)}/signed-preview-url',
+        params={'expiresInSeconds': int(expires_in_seconds)})
+    if not isinstance(got, dict) or not got.get('url'):
+        raise DaytonaError(
+            f'No signed preview URL for {sandbox_id} port {port}: {got!r}')
+    return str(got['url'])
+
+
 def preview_url(sandbox_id: str, port: int) -> Tuple[str, str]:
     """``(url, token)`` for a port served inside the sandbox.
 

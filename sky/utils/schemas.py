@@ -1560,6 +1560,11 @@ _DAYTONA_CLOUD_PROPERTIES = {
     'ssh_access_minutes': {
         'type': 'integer',
     },
+    # Lifetime of the signed preview URL. Anyone holding it reaches the port
+    # until it expires, and SkyRL authenticates nothing itself.
+    'signed_url_seconds': {
+        'type': 'integer',
+    },
     # Daytona REPLACES its tier default with this list rather than extending
     # it, so a list must name everything the node needs. [] disables it (Tier
     # 3/4 organizations have full internet).

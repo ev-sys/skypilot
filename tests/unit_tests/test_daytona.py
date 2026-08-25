@@ -463,3 +463,40 @@ class TestBakedSnapshot:
                             lambda n: self._snap(state='building'))
         problem = daytona_utils.check_snapshot_shape('s', self._cfg())
         assert problem and 'building' in problem
+
+
+class TestServing:
+    """A served port has to be reachable by a client that sets no headers."""
+
+    def test_endpoint_is_a_signed_url(self, api_key, monkeypatch):
+        # The plain preview URL needs an x-daytona-preview-token HEADER, and
+        # neither SkyPilot's endpoint model nor the tinker client can add one.
+        monkeypatch.setattr(daytona_utils, 'find_sandboxes',
+                            lambda *a, **k: [{'id': 'sbx-1',
+                                              'createdAt': '2026-01-01'}])
+        seen = {}
+
+        def fake_signed(sandbox_id, port, expires):
+            seen['expires'] = expires
+            return f'https://{port}-tok123.daytonaproxy01.net'
+
+        monkeypatch.setattr(daytona_utils, 'signed_preview_url', fake_signed)
+        got = daytona_instance.query_ports('c-1', ['8000'])
+        assert got[8000][0].host == '8000-tok123.daytonaproxy01.net'
+        # Explicit and bounded: Daytona's own default is 60s.
+        assert seen['expires'] == 86400
+
+    def test_falls_back_to_the_header_gated_url(self, api_key, monkeypatch):
+        monkeypatch.setattr(daytona_utils, 'find_sandboxes',
+                            lambda *a, **k: [{'id': 'sbx-1',
+                                              'createdAt': '2026-01-01'}])
+
+        def boom(*a, **k):
+            raise daytona_utils.DaytonaError('signing unavailable')
+
+        monkeypatch.setattr(daytona_utils, 'signed_preview_url', boom)
+        monkeypatch.setattr(
+            daytona_utils, 'preview_url',
+            lambda s, p: (f'https://{p}-sbx-1.daytonaproxy01.net', 'tok'))
+        got = daytona_instance.query_ports('c-1', ['8000'])
+        assert got[8000][0].host == '8000-sbx-1.daytonaproxy01.net'

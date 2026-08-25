@@ -57,6 +57,12 @@ _DEFAULT_STARTUP_TIMEOUT_S = 15 * 60
 #: unsupported here, so this is the teardown that survives the API server
 #: dying. Never left unset by default.
 _DEFAULT_TTL_MINUTES = 6 * 60
+#: Lifetime of a SIGNED preview URL. The token rides IN the URL, so anyone
+#: holding it can reach the port until it expires and SkyRL authenticates
+#: nothing of its own -- hence bounded, and explicit (Daytona's own default
+#: is 60s, deliberately short, and the docs say always to set it).
+_DEFAULT_SIGNED_URL_SECONDS = 24 * 60 * 60
+
 #: How long a minted SSH access token lasts. Re-minted on every
 #: ``get_cluster_info()``, so this only bounds how stale a cached one can be.
 _DEFAULT_SSH_ACCESS_MINUTES = 24 * 60
@@ -297,6 +303,8 @@ class Daytona(clouds.Cloud):
                                                    _DEFAULT_TTL_MINUTES),
             'daytona_ssh_access_minutes': _daytona_config(
                 'ssh_access_minutes', _DEFAULT_SSH_ACCESS_MINUTES),
+            'daytona_signed_url_seconds': _daytona_config(
+                'signed_url_seconds', _DEFAULT_SIGNED_URL_SECONDS),
         }
 
     def _get_feasible_launchable_resources(
