@@ -2294,9 +2294,27 @@ class ModalCommandRunner(CommandRunner):
                     rc, 'modal upload chunk',
                     f'Failed to stage a file chunk in the container: {out}',
                     None)
+        # A FILE must land at `target`, not at its source basename. The
+        # archive carries the source's own name, and `tar -C dest_dir` uses
+        # that name -- so without the rename below, rsyncing
+        # `/tmp/sky_app_a6ctidls` to `~/.sky/sky_app/sky_job_1` deposits
+        # `sky_app_a6ctidls` and leaves `sky_job_1` missing, while the MARKER
+        # is still written at the requested path. That is exactly how every
+        # SkyPilot job died on Modal: the backend rsyncs its generated driver
+        # from a randomly-named temp file to `sky_app/sky_job_<id>`, ray then
+        # runs `python ~/.sky/sky_app/sky_job_1`, and the job goes
+        # FAILED_DRIVER with `can't open file ... No such file or directory`.
+        # The stale marker also made it unrecoverable: a retry read a matching
+        # digest and transferred nothing.
+        rename = ''
+        if not resolved.is_dir():
+            extracted = str(pathlib.PurePosixPath(dest_dir) / resolved.name)
+            if extracted != target:
+                rename = f'mv -f {shlex.quote(extracted)} {shlex.quote(target)} && '
         rc, out = self._exec_checked(
             f'mkdir -p {shlex.quote(dest_dir)} && '
             f'base64 -d {staging} | tar xzf - -C {shlex.quote(dest_dir)} && '
+            f'{rename}'
             f'rm -f {staging} && '
             f'printf %s {shlex.quote(digest)} > {shlex.quote(marker)}',
             timeout=timeout)
