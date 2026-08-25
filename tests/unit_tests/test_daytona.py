@@ -427,18 +427,32 @@ class TestDocumentedDefaults:
         assert 'localhost' in v and '127.0.0.1' in v
         assert '172.16.0.0/12' in v
 
-    def test_ray_is_pinned_to_loopback(self, api_key, monkeypatch):
-        # Ray otherwise advertises GCS on the sandbox's veth address, and
-        # traffic to a private address crosses the per-sandbox firewall --
-        # `FD Shutdown` while gcs_server is alive. One sandbox is one node, so
-        # loopback is correct, not a workaround.
+    def test_ray_node_ip_comes_from_skypilots_own_hook(self, api_key,
+                                                       monkeypatch):
+        # Measured on a controlled pair: with the tier default a sandbox
+        # reaches its own veth address; with a domainAllowList set it TIMES
+        # OUT while loopback still works. One sandbox is one node, so loopback
+        # is both correct and the only thing that works.
+        #
+        # The flag is rendered once, from SKYPILOT_RAY_NODE_IP, not twice.
+        seen = {}
+        monkeypatch.setattr(
+            daytona_utils, '_request',
+            lambda m, p, params=None, body=None, **k: (
+                seen.update(body=body) or {'id': 'sbx-1'}))
+        daytona_utils.create_sandbox('c-1', {
+            'Cpu': 8, 'Memory': 32, 'Disk': 50, 'Gpu': 1, 'GpuType': 'H100',
+            'DefaultImage': 'x',
+        })
+        assert seen['body']['env']['SKYPILOT_RAY_NODE_IP'] == '127.0.0.1'
+
         monkeypatch.setattr(
             daytona_utils, 'find_sandboxes', lambda *a, **k: [{
-                'id': 'sbx-1', 'cpu': 4, 'memory': 16,
+                'id': 'sbx-1', 'cpu': 8, 'memory': 32,
                 'createdAt': '2026-01-01',
             }])
         info = daytona_instance.get_cluster_info('us', 'c-1')
-        assert info.custom_ray_options['node-ip-address'] == '127.0.0.1'
+        assert 'node-ip-address' not in info.custom_ray_options
         assert info.get_head_instance().internal_ip == '127.0.0.1'
 
 

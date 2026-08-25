@@ -300,22 +300,13 @@ def _ray_sizing(sandboxes: List[Dict[str, Any]],
         'num-cpus': cpus,
         'memory': int(total_bytes * 0.70),
         'object-store-memory': int(total_bytes * 0.20),
-        # Pin ray to loopback. Left to itself ray picks the sandbox's veth
-        # address (e.g. 172.20.0.3) and advertises GCS there, and a connection
-        # to that address is then killed -- `ray status` reports
-        # `FD Shutdown` while `gcs_server` is demonstrably alive. Daytona
-        # documents that every sandbox sits behind a per-sandbox firewall
-        # governing outbound traffic, with private ranges reachable only via an
-        # explicit `networkAllowList` CIDR entry
-        # (https://www.daytona.io/docs/en/network-limits.md), so traffic to the
-        # sandbox's own private address is filtered like any other.
-        #
-        # A Daytona cluster is single-node by construction (MULTI_NODE is
-        # unsupported: one sandbox is one container), so ray never needs a
-        # routable node address. Loopback is never firewalled, which makes this
-        # the correct answer rather than a workaround -- and it is why
-        # `get_cluster_info` reports `internal_ip='127.0.0.1'` too.
-        'node-ip-address': '127.0.0.1',
+        # NOTE: --node-ip-address is NOT set here. It comes from the
+        # SKYPILOT_RAY_NODE_IP env var the provisioner puts on the sandbox,
+        # which SkyPilot's own ray-start template already expands
+        # (`${SKYPILOT_RAY_NODE_IP:+--node-ip-address=...}`). Setting it in
+        # both places rendered the flag TWICE. See daytona_utils.create_sandbox
+        # for why loopback is the only address that works once a
+        # domainAllowList is in force.
     }
 
 

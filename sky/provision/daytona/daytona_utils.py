@@ -450,9 +450,22 @@ def create_sandbox(cluster_name_on_cloud: str, node_config: Dict[str,
     ttl_minutes = node_config.get('TtlMinutes')
     if ttl_minutes:
         body['ttlMinutes'] = int(ttl_minutes)
-    env = node_config.get('Env') or {}
-    if env:
-        body['env'] = dict(env)
+    env = dict(node_config.get('Env') or {})
+    # One sandbox is one node, so loopback is the only address that matters --
+    # and with a domainAllowList in force it is the only one that WORKS.
+    # Measured on a controlled pair of sandboxes: with the tier default a
+    # sandbox reaches its own veth address fine; with a domainAllowList set,
+    # connecting to its own address TIMES OUT (the firewall filters it like any
+    # other IP destination) while loopback stays reachable. Ray binds GCS on
+    # loopback either way, but anything that resolves the node's address --
+    # the raylet, ray clients -- then hangs.
+    #
+    # This is SkyPilot's OWN hook (`${SKYPILOT_RAY_NODE_IP:+--node-ip-address=
+    # $SKYPILOT_RAY_NODE_IP}` in provision/instance_setup.py), so setting it
+    # here means every place SkyPilot reasons about the node address agrees,
+    # and exactly one --node-ip-address flag is rendered.
+    env.setdefault('SKYPILOT_RAY_NODE_IP', '127.0.0.1')
+    body['env'] = env
     allow = node_config.get('DomainAllowList')
     if allow is None:
         allow = list(DEFAULT_DOMAIN_ALLOW_LIST)
