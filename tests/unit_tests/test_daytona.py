@@ -329,3 +329,50 @@ class TestDeployVariables:
         assert variables['daytona_disk'] == 200
         assert variables['daytona_gpu_type'] == 'H100'
         assert variables['daytona_gpu'] == 1
+
+
+class TestContainerRealities:
+    """Things that are true because a sandbox is a container, not a VM."""
+
+    def test_ray_is_told_the_real_size(self, api_key, monkeypatch):
+        # /proc is the HOST's: an 8 vCPU / 32 GiB sandbox reports nproc=192
+        # and free=338 GiB. Ray sizes itself from those and dies at startup
+        # ("Failed to start GCS"), so the sandbox record is the source of
+        # truth instead.
+        monkeypatch.setattr(
+            daytona_utils, 'find_sandboxes', lambda *a, **k: [{
+                'id': 'sbx-1', 'cpu': 8, 'memory': 32,
+                'createdAt': '2026-01-01',
+            }])
+        info = daytona_instance.get_cluster_info('us', 'c-1')
+        opts = info.custom_ray_options
+        assert opts['num-cpus'] == 8
+        # Heap + object store must leave headroom for the workload itself.
+        assert opts['memory'] + opts['object-store-memory'] < 32 * 1024**3
+
+    def test_ray_sizing_is_absent_when_unknowable(self, api_key, monkeypatch):
+        monkeypatch.setattr(daytona_utils, 'find_sandboxes',
+                            lambda *a, **k: [{'id': 'sbx-1',
+                                              'createdAt': '2026-01-01'}])
+        info = daytona_instance.get_cluster_info('us', 'c-1')
+        assert info.custom_ray_options == {}
+
+    def test_no_proxy_is_set_alongside_the_allow_list(self, api_key,
+                                                     monkeypatch):
+        # A domainAllowList makes Daytona inject an HTTP/1.1 CONNECT proxy,
+        # which cannot carry HTTP/2 -- `uv sync` dies with "tunnel error".
+        seen = {}
+
+        def fake(method, path, params=None, body=None, **kw):
+            seen['body'] = body
+            return {'id': 'sbx-1'}
+
+        monkeypatch.setattr(daytona_utils, '_request', fake)
+        daytona_utils.create_sandbox('c-1', {
+            'Cpu': 4, 'Memory': 16, 'Disk': 50, 'Gpu': 1, 'GpuType': 'H100',
+            'DefaultImage': 'x', 'DomainAllowList': ['pypi.org', '*.hf.co'],
+        })
+        body = seen['body']
+        assert body['domainAllowList'] == 'pypi.org,*.hf.co'
+        assert body['env']['no_proxy'] == 'pypi.org,hf.co'
+        assert body['env']['NO_PROXY'] == 'pypi.org,hf.co'

@@ -244,7 +244,45 @@ def get_cluster_info(
                               head_instance_id=head_instance_id,
                               provider_name=PROVIDER_NAME,
                               provider_config=provider_config,
-                              ssh_user='root')
+                              ssh_user='root',
+                              custom_ray_options=_ray_sizing(sandboxes,
+                                                             head_instance_id))
+
+
+def _ray_sizing(sandboxes: List[Dict[str, Any]],
+                head_instance_id: Optional[str]) -> Dict[str, Any]:
+    """Tell ray the sandbox's real size, because the container lies.
+
+    A Daytona sandbox is cgroup-limited, but ``/proc`` is the **host's**:
+    measured on an 8 vCPU / 32 GiB sandbox, ``nproc`` reports **192** and
+    ``free -g`` reports **338 GiB**. Ray sizes its heap, object store and
+    worker pool from exactly those numbers when it is not told otherwise, so
+    it tries to reserve host-scale memory inside a container that does not
+    have it and dies at startup -- surfacing as SkyPilot's
+    ``RuntimeError: Failed to start GCS`` with an empty error file, which
+    names neither the cause nor the resource.
+
+    So the sizes come from the sandbox record instead. The split (70% heap,
+    20% object store) leaves headroom for the workload itself, which is the
+    thing actually meant to use this box.
+    """
+    record = None
+    for sandbox in sandboxes:
+        if str(sandbox.get('id')) == head_instance_id:
+            record = sandbox
+            break
+    if record is None:
+        return {}
+    cpus = int(record.get('cpu') or 0)
+    memory_gib = int(record.get('memory') or 0)
+    if not cpus or not memory_gib:
+        return {}
+    total_bytes = memory_gib * (1024 ** 3)
+    return {
+        'num-cpus': cpus,
+        'memory': int(total_bytes * 0.70),
+        'object-store-memory': int(total_bytes * 0.20),
+    }
 
 
 def get_command_runners(
