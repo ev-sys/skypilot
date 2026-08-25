@@ -397,6 +397,11 @@ def create_sandbox(cluster_name_on_cloud: str, node_config: Dict[str,
     if allow is None:
         allow = list(DEFAULT_DOMAIN_ALLOW_LIST)
     if allow:
+        if len(allow) > MAX_DOMAIN_ALLOW_LIST:
+            raise DaytonaError(
+                f'Daytona accepts at most {MAX_DOMAIN_ALLOW_LIST} domains in '
+                f'domainAllowList; {len(allow)} were given. Collapse them with '
+                'wildcards (e.g. "*.huggingface.co").')
         # Setting a domainAllowList makes Daytona inject HTTP(S)_PROXY into the
         # sandbox, and that proxy is HTTP/1.1 CONNECT only -- it cannot carry
         # HTTP/2 or gRPC. Measured: `uv sync` dies with
@@ -413,11 +418,6 @@ def create_sandbox(cluster_name_on_cloud: str, node_config: Dict[str,
         env.setdefault('no_proxy', no_proxy)
         env.setdefault('NO_PROXY', no_proxy)
         body['env'] = env
-        if len(allow) > MAX_DOMAIN_ALLOW_LIST:
-            raise DaytonaError(
-                f'Daytona accepts at most {MAX_DOMAIN_ALLOW_LIST} domains in '
-                f'domainAllowList; {len(allow)} were given. Collapse them with '
-                'wildcards (e.g. "*.huggingface.co").')
         # Only set when non-empty: an empty value would REPLACE the tier
         # default with nothing and cut off ALL egress.
         body['domainAllowList'] = ','.join(allow)
