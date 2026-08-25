@@ -80,6 +80,19 @@ class DaytonaError(RuntimeError):
     """A Daytona API call failed."""
 
 
+class DaytonaAuthThrottled(DaytonaError):
+    """A 401/429 that is Daytona's per-IP auth throttle, not a bad credential.
+
+    Separate from :class:`DaytonaError` because the correct response is the
+    opposite: wait and retry, rather than stop and fix the key. ``retry_s``
+    carries Daytona's own ``retry-after``.
+    """
+
+    def __init__(self, message: str, retry_s: int):
+        super().__init__(message)
+        self.retry_s = retry_s
+
+
 def _api_url() -> str:
     return os.environ.get(API_URL_ENV_VAR, DEFAULT_API_URL).rstrip('/')
 
@@ -106,6 +119,58 @@ def api_key() -> str:
     return str(key)
 
 
+#: Daytona's **undocumented** per-IP auth throttler. Measured live, because
+#: none of it is in the docs (which list only ``-anonymous``,
+#: ``-authenticated``, ``-sandbox-create``, ``-sandbox-lifecycle``):
+#:
+#: * limit **20 failures per 3 s**, ``retry-after: 10`` once exhausted;
+#: * keyed by **source IP, not by API key** -- two *different* bogus keys and a
+#:   request with *no* key all decrement the same counter;
+#: * a **valid** key never touches it (it only spends ``-authenticated``,
+#:   which is 50,000 per 60 s -- three orders of magnitude more headroom).
+#:
+#: Why this matters for a hosted worker: Render workers share outbound IPs with
+#: many tenants, so *somebody else's* bad credentials can exhaust the budget,
+#: and a request carrying a perfectly good key is then rejected. The rejection
+#: is itself a failed auth, so retrying keeps the budget pinned at zero -- an
+#: outage that sustains itself for as long as the client keeps trying.
+#:
+#: Hence :func:`throttled_auth`: a 401 whose
+#: ``x-ratelimit-remaining-failed-auth`` is ``0`` is a THROTTLE, not a bad
+#: credential, and the two demand opposite responses -- back off versus stop
+#: and fix the key. Telling them apart is the whole point.
+FAILED_AUTH_HEADER = 'x-ratelimit-remaining-failed-auth'
+RETRY_AFTER_HEADER = 'retry-after'
+#: Cap on how long a single call will sit out a throttle.
+MAX_THROTTLE_WAIT_S = 30
+
+
+def throttled_auth(status: int, headers: Any) -> Optional[int]:
+    """Seconds to wait if this is a per-IP auth throttle, else None.
+
+    ``headers`` is anything with a case-insensitive ``get``.
+    """
+    if status not in (401, 429):
+        return None
+    try:
+        remaining = headers.get(FAILED_AUTH_HEADER)
+        retry_after = headers.get(RETRY_AFTER_HEADER)
+    except Exception:  # pylint: disable=broad-except
+        return None
+    if remaining is None:
+        return None
+    try:
+        if int(remaining) > 0:
+            return None
+    except (TypeError, ValueError):
+        return None
+    try:
+        wait = int(retry_after) if retry_after is not None else 10
+    except (TypeError, ValueError):
+        wait = 10
+    return max(1, min(wait, MAX_THROTTLE_WAIT_S))
+
+
 def _request(method: str,
              path: str,
              *,
@@ -130,6 +195,15 @@ def _request(method: str,
                            f'{e}') from e
     if resp.status_code >= 400:
         detail = resp.text[:400]
+        wait = throttled_auth(resp.status_code, resp.headers)
+        if wait is not None:
+            raise DaytonaAuthThrottled(
+                f'Daytona rejected {method} {path} with HTTP '
+                f'{resp.status_code}, but this is the per-IP auth throttle, '
+                f'NOT a bad credential: {FAILED_AUTH_HEADER} is 0. Retry in '
+                f'{wait}s. On shared egress (e.g. Render) another tenant\'s '
+                'failures exhaust this budget and your valid key is rejected '
+                f'with it. Detail: {detail}', wait)
         raise DaytonaError(f'Daytona API {method} {path} failed with HTTP '
                            f'{resp.status_code}: {detail}')
     if not resp.content:
@@ -781,6 +855,12 @@ def _toolbox_request(method: str,
         raise DaytonaError(f'Daytona toolbox unreachable ({method} {path}): '
                            f'{e}') from e
     if resp.status_code >= 400:
+        wait = throttled_auth(resp.status_code, resp.headers)
+        if wait is not None:
+            raise DaytonaAuthThrottled(
+                f'Daytona toolbox {method} {path}: HTTP {resp.status_code} '
+                f'from the per-IP auth throttle (not a bad key). Retry in '
+                f'{wait}s.', wait)
         raise DaytonaError(f'Daytona toolbox {method} {path} failed with HTTP '
                            f'{resp.status_code}: {resp.text[:400]}')
     if raw:
