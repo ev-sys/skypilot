@@ -376,3 +376,90 @@ class TestContainerRealities:
         assert body['domainAllowList'] == 'pypi.org,*.hf.co'
         assert body['env']['no_proxy'] == 'pypi.org,hf.co'
         assert body['env']['NO_PROXY'] == 'pypi.org,hf.co'
+
+
+class TestDocumentedDefaults:
+    """Behaviour that follows Daytona's own docs rather than experiment."""
+
+    def test_no_allow_list_by_default_so_no_proxy_is_injected(
+            self, api_key, monkeypatch):
+        # Essential services (pypi, astral.sh, github, conda, pytorch.org, HF,
+        # ubuntu/debian) are reachable on EVERY tier with no configuration.
+        # Setting domainAllowList replaces that broader default AND makes
+        # Daytona inject an HTTP/1.1 CONNECT proxy that cannot carry HTTP/2.
+        seen = {}
+
+        def fake(method, path, params=None, body=None, **kw):
+            seen['body'] = body
+            return {'id': 'sbx-1'}
+
+        monkeypatch.setattr(daytona_utils, '_request', fake)
+        daytona_utils.create_sandbox('c-1', {
+            'Cpu': 4, 'Memory': 16, 'Disk': 50, 'Gpu': 1, 'GpuType': 'H100',
+            'DefaultImage': 'x',
+        })
+        assert 'domainAllowList' not in seen['body']
+        assert 'no_proxy' not in (seen['body'].get('env') or {})
+
+    def test_ray_is_pinned_to_loopback(self, api_key, monkeypatch):
+        # Ray otherwise advertises GCS on the sandbox's veth address, and
+        # traffic to a private address crosses the per-sandbox firewall --
+        # `FD Shutdown` while gcs_server is alive. One sandbox is one node, so
+        # loopback is correct, not a workaround.
+        monkeypatch.setattr(
+            daytona_utils, 'find_sandboxes', lambda *a, **k: [{
+                'id': 'sbx-1', 'cpu': 4, 'memory': 16,
+                'createdAt': '2026-01-01',
+            }])
+        info = daytona_instance.get_cluster_info('us', 'c-1')
+        assert info.custom_ray_options['node-ip-address'] == '127.0.0.1'
+        assert info.get_head_instance().internal_ip == '127.0.0.1'
+
+
+class TestBakedSnapshot:
+    """A snapshot fixes the machine shape, not just the filesystem."""
+
+    def _snap(self, **over):
+        rec = {'name': 'evsys-skyrl-42f3d44-rtx-5090-1x-8c32m150d',
+               'state': 'active', 'cpu': 8, 'memory': 32, 'disk': 150,
+               'gpu': 1, 'gpuType': ['RTX-5090']}
+        rec.update(over)
+        return rec
+
+    def _cfg(self, **over):
+        cfg = {'Cpu': 8, 'Memory': 32, 'Disk': 150, 'Gpu': 1,
+               'GpuType': 'RTX-5090'}
+        cfg.update(over)
+        return cfg
+
+    def test_matching_shape_passes(self, api_key, monkeypatch):
+        monkeypatch.setattr(daytona_utils, 'get_snapshot',
+                            lambda n: self._snap())
+        assert daytona_utils.check_snapshot_shape('s', self._cfg()) is None
+
+    def test_mismatched_shape_is_refused_because_it_is_a_pricing_lie(
+            self, api_key, monkeypatch):
+        # Booting it would hand back the BAKED shape while SkyPilot priced the
+        # planned one.
+        monkeypatch.setattr(daytona_utils, 'get_snapshot',
+                            lambda n: self._snap(memory=8))
+        problem = daytona_utils.check_snapshot_shape('s', self._cfg())
+        assert problem and 'memory' in problem and 'price' in problem
+
+    def test_wrong_gpu_type_is_refused(self, api_key, monkeypatch):
+        monkeypatch.setattr(daytona_utils, 'get_snapshot',
+                            lambda n: self._snap(gpuType=['H100']))
+        problem = daytona_utils.check_snapshot_shape('s', self._cfg())
+        assert problem and 'gpuType' in problem
+
+    def test_missing_snapshot_names_the_build_script(self, api_key,
+                                                    monkeypatch):
+        monkeypatch.setattr(daytona_utils, 'get_snapshot', lambda n: None)
+        problem = daytona_utils.check_snapshot_shape('s', self._cfg())
+        assert 'publish_daytona_snapshot.py' in problem
+
+    def test_still_building_is_refused(self, api_key, monkeypatch):
+        monkeypatch.setattr(daytona_utils, 'get_snapshot',
+                            lambda n: self._snap(state='building'))
+        problem = daytona_utils.check_snapshot_shape('s', self._cfg())
+        assert problem and 'building' in problem

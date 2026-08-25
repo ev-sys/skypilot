@@ -296,35 +296,31 @@ def check_gpu_quota(region: str, gpu_count: int) -> Optional[str]:
 #: torch index and the HF CDN. A Tier 3/4 organization has full internet and
 #: needs none of it; ``domain_allow_list: []`` in ``~/.sky/config.yaml`` under
 #: ``daytona`` turns it off.
-#: Daytona caps this list at **20 entries** (measured: 24 entries -> HTTP 400
-#: "Domain allow list cannot contain more than 20 domains"), so it is written
-#: with wildcards to stay well under, leaving room for a caller to add a few.
+#: Daytona caps a domain allow list at **20 entries** (measured: 24 -> HTTP 400
+#: "Domain allow list cannot contain more than 20 domains").
 MAX_DOMAIN_ALLOW_LIST = 20
 
-DEFAULT_DOMAIN_ALLOW_LIST = (
-    # uv + conda + the SkyPilot runtime
-    'astral.sh',
-    '*.astral.sh',
-    'repo.anaconda.com',
-    # PyPI
-    'pypi.org',
-    '*.pythonhosted.org',
-    # GitHub (SkyRL clone, uv release assets, codeload, raw)
-    'github.com',
-    '*.github.com',
-    '*.githubusercontent.com',
-    # Torch wheels
-    'download.pytorch.org',
-    # Hugging Face models/datasets and their CDN
-    'huggingface.co',
-    '*.huggingface.co',
-    'hf.co',
-    '*.hf.co',
-    '*.xethub.hf.co',
-    # Distro archives, for any apt an image still needs at runtime
-    '*.ubuntu.com',
-    '*.debian.org',
-)
+#: **No allow list by default, and that is the documented answer.**
+#:
+#: Daytona's "essential services" are reachable on *every* tier without any
+#: configuration, and they already cover everything a SkyPilot node needs to
+#: build itself -- ``pypi.org`` / ``files.pythonhosted.org`` /
+#: ``bootstrap.pypa.io``, ``astral.sh`` + ``*.astral.sh`` (the uv installer),
+#: ``repo.anaconda.com``, ``github.com`` / ``*.github.com`` /
+#: ``*.githubusercontent.com``, ``pytorch.org`` / ``*.pytorch.org``,
+#: ``huggingface.co`` / ``*.hf.co`` / ``*.xethub.hf.co``, and the Ubuntu and
+#: Debian archives.
+#: (https://www.daytona.io/docs/en/network-limits.md#essential-services)
+#:
+#: Setting ``domainAllowList`` therefore does not *add* to that set -- it
+#: REPLACES the tier default with a narrower one, and it makes Daytona inject
+#: ``HTTP_PROXY``/``HTTPS_PROXY`` into the sandbox. That injected proxy is
+#: HTTP/1.1 CONNECT only, which is what broke ``uv sync`` with
+#: ``tunnel error: unsuccessful``. Two self-inflicted failures for no benefit.
+#:
+#: The knob stays for a workload that genuinely needs a domain outside the
+#: essential set; the default is to leave Daytona's own policy alone.
+DEFAULT_DOMAIN_ALLOW_LIST: tuple = ()
 
 
 # -- sandboxes --------------------------------------------------------------
@@ -518,6 +514,66 @@ def preempted_at(sandbox_id: str) -> Optional[str]:
     if record is None:
         return None
     return record.get('spotEvictedAt') or None
+
+
+def get_snapshot(name_or_id: str) -> Optional[Dict[str, Any]]:
+    """A snapshot record, or None when it does not exist."""
+    try:
+        got = _request('GET', f'snapshots/{name_or_id}')
+    except DaytonaError as e:
+        if '404' in str(e):
+            return None
+        raise
+    return got if isinstance(got, dict) else None
+
+
+def check_snapshot_shape(name: str,
+                         node_config: Dict[str, Any]) -> Optional[str]:
+    """Why booting this snapshot would not give the planned machine, or None.
+
+    A Daytona snapshot fixes the machine shape as well as the filesystem:
+    ``POST /api/sandbox`` takes ``snapshot`` **instead of**
+    cpu/memory/disk/gpu and rejects a create that sends both. So a snapshot
+    whose baked shape differs from the one SkyPilot chose would silently hand
+    back a different machine than was planned -- and than was **priced**,
+    which is the part that matters. Better to say so than to bill a surprise.
+
+    Returns None when the snapshot is missing: that is a separate failure with
+    its own message at create time, and guessing here would hide it.
+    """
+    record = get_snapshot(name)
+    if record is None:
+        return (f'Daytona snapshot {name!r} does not exist. Build it with '
+                'scripts/publish_daytona_snapshot.py in evsys-enterprise, or '
+                'clear the `daytona.snapshot` config to take the slower '
+                'image path.')
+    if str(record.get('state') or '').lower() != 'active':
+        return (f'Daytona snapshot {name!r} is in state '
+                f'{record.get("state")!r}, not active'
+                + (f': {record["errorReason"]}' if record.get('errorReason')
+                   else '.'))
+    mismatches = []
+    for field, key in (('Cpu', 'cpu'), ('Memory', 'memory'),
+                       ('Disk', 'disk'), ('Gpu', 'gpu')):
+        want = node_config.get(field)
+        got = record.get(key)
+        if want is None or got is None:
+            continue
+        if int(want) != int(got):
+            mismatches.append(f'{key}: snapshot has {got}, plan wants {want}')
+    want_type = node_config.get('GpuType')
+    got_types = [str(t) for t in (record.get('gpuType') or [])]
+    if want_type and got_types and want_type not in got_types:
+        mismatches.append(
+            f'gpuType: snapshot has {"/".join(got_types)}, plan wants '
+            f'{want_type}')
+    if mismatches:
+        return (f'Daytona snapshot {name!r} was baked for a different machine '
+                f'than SkyPilot planned ({"; ".join(mismatches)}). A snapshot '
+                'carries its resources, so booting it would quietly give you '
+                'the baked shape at the planned price. Bake a snapshot for '
+                'this shape or pin the matching resources.')
+    return None
 
 
 # -- reachability -----------------------------------------------------------

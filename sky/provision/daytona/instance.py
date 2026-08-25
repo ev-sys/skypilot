@@ -105,6 +105,18 @@ def run_instances(region: str, cluster_name: str, cluster_name_on_cloud: str,
     if quota_problem is not None:
         with ux_utils.print_exception_no_traceback():
             raise RuntimeError(quota_problem)
+    # A snapshot carries the machine shape, so a mismatched one would hand
+    # back a different node than was planned AND priced. Also free.
+    snapshot = node_config.get('Snapshot')
+    if snapshot:
+        shape_problem = daytona_utils.check_snapshot_shape(
+            snapshot, node_config)
+        if shape_problem is not None:
+            with ux_utils.print_exception_no_traceback():
+                raise RuntimeError(shape_problem)
+        logger.info(f'Booting {cluster_name_on_cloud} from baked snapshot '
+                    f'{snapshot} — SkyRL is already installed, so SETUP takes '
+                    'its fast path.')
     sandbox_id = daytona_utils.create_sandbox(cluster_name_on_cloud,
                                               node_config)
     logger.info(f'Created Daytona sandbox {sandbox_id} for '
@@ -253,9 +265,14 @@ def _ray_sizing(sandboxes: List[Dict[str, Any]],
                 head_instance_id: Optional[str]) -> Dict[str, Any]:
     """Tell ray the sandbox's real size, because the container lies.
 
-    A Daytona sandbox is cgroup-limited, but ``/proc`` is the **host's**:
-    measured on an 8 vCPU / 32 GiB sandbox, ``nproc`` reports **192** and
-    ``free -g`` reports **338 GiB**. Ray sizes its heap, object store and
+    A Daytona sandbox is cgroup-limited, but ``/proc`` is the **host's**.
+    Daytona documents this outright -- "Tools such as ``nproc``, ``free``,
+    ``top``, ``htop``, ``/proc/cpuinfo``, and ``/proc/meminfo`` read host-level
+    values and do not reflect sandbox resource limits", pointing at
+    ``/sys/fs/cgroup/cpu.max`` and ``/sys/fs/cgroup/memory.max`` instead
+    (https://www.daytona.io/docs/en/sandboxes.md). Measured on an 8 vCPU /
+    32 GiB sandbox: ``nproc`` reports **192** and ``free -g`` reports
+    **338 GiB**. Ray sizes its heap, object store and
     worker pool from exactly those numbers when it is not told otherwise, so
     it tries to reserve host-scale memory inside a container that does not
     have it and dies at startup -- surfacing as SkyPilot's
@@ -282,6 +299,22 @@ def _ray_sizing(sandboxes: List[Dict[str, Any]],
         'num-cpus': cpus,
         'memory': int(total_bytes * 0.70),
         'object-store-memory': int(total_bytes * 0.20),
+        # Pin ray to loopback. Left to itself ray picks the sandbox's veth
+        # address (e.g. 172.20.0.3) and advertises GCS there, and a connection
+        # to that address is then killed -- `ray status` reports
+        # `FD Shutdown` while `gcs_server` is demonstrably alive. Daytona
+        # documents that every sandbox sits behind a per-sandbox firewall
+        # governing outbound traffic, with private ranges reachable only via an
+        # explicit `networkAllowList` CIDR entry
+        # (https://www.daytona.io/docs/en/network-limits.md), so traffic to the
+        # sandbox's own private address is filtered like any other.
+        #
+        # A Daytona cluster is single-node by construction (MULTI_NODE is
+        # unsupported: one sandbox is one container), so ray never needs a
+        # routable node address. Loopback is never firewalled, which makes this
+        # the correct answer rather than a workaround -- and it is why
+        # `get_cluster_info` reports `internal_ip='127.0.0.1'` too.
+        'node-ip-address': '127.0.0.1',
     }
 
 
