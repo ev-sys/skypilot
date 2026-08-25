@@ -397,6 +397,22 @@ def create_sandbox(cluster_name_on_cloud: str, node_config: Dict[str,
     if allow is None:
         allow = list(DEFAULT_DOMAIN_ALLOW_LIST)
     if allow:
+        # Setting a domainAllowList makes Daytona inject HTTP(S)_PROXY into the
+        # sandbox, and that proxy is HTTP/1.1 CONNECT only -- it cannot carry
+        # HTTP/2 or gRPC. Measured: `uv sync` dies with
+        # `tunnel error: unsuccessful` fetching torch, because uv negotiates
+        # HTTP/2. Naming the allow-listed domains in `no_proxy` makes clients
+        # talk to them directly instead of through the tunnel.
+        #
+        # This does NOT widen egress: with a domainAllowList, web-port traffic
+        # is redirected at the network layer, which a sandbox cannot bypass by
+        # clearing an environment variable. It only stops well-behaved clients
+        # from wrapping their own traffic in CONNECT.
+        no_proxy = ','.join(d.lstrip('*.') for d in allow)
+        env = dict(body.get('env') or {})
+        env.setdefault('no_proxy', no_proxy)
+        env.setdefault('NO_PROXY', no_proxy)
+        body['env'] = env
         if len(allow) > MAX_DOMAIN_ALLOW_LIST:
             raise DaytonaError(
                 f'Daytona accepts at most {MAX_DOMAIN_ALLOW_LIST} domains in '
