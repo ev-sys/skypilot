@@ -1,0 +1,113 @@
+{
+  "id": "94e961b5-164d-4b3d-9887-a14f722d75d5",
+  "_created_at": 1787631926.211715,
+  "experiment_id": "eff3b408-6612-4615-bfdd-690fbbfe01af",
+  "seed": 42,
+  "recipe_kind": "sft",
+  "run_config": {
+    "name": "sft_lora_daytona",
+    "data": {
+      "source_kind": "in_memory",
+      "dataset_id": null,
+      "dataset_name": null,
+      "path": null,
+      "rows": [
+        {
+          "messages": [
+            {
+              "role": "user",
+              "content": "What is Daytona?"
+            },
+            {
+              "role": "assistant",
+              "content": "Daytona rents GPU sandboxes by the second."
+            }
+          ]
+        },
+        {
+          "messages": [
+            {
+              "role": "user",
+              "content": "What is SkyPilot?"
+            },
+            {
+              "role": "assistant",
+              "content": "SkyPilot provisions clusters across clouds."
+            }
+          ]
+        },
+        {
+          "messages": [
+            {
+              "role": "user",
+              "content": "What is SkyRL?"
+            },
+            {
+              "role": "assistant",
+              "content": "SkyRL serves the Tinker protocol on your GPUs."
+            }
+          ]
+        },
+        {
+          "messages": [
+            {
+              "role": "user",
+              "content": "What is a LoRA adapter?"
+            },
+            {
+              "role": "assistant",
+              "content": "A LoRA adapter trains few parameters."
+            }
+          ]
+        }
+      ],
+      "hf_dataset": null,
+      "hf_split": "train",
+      "transforms": []
+    },
+    "model": {
+      "name": "Qwen/Qwen3-0.6B",
+      "load_checkpoint_path": null,
+      "init_from_checkpoint": null,
+      "renderer_name": null,
+      "thinking": false
+    },
+    "algorithm": {
+      "kind": "sft",
+      "params": {
+        "max_steps": 8,
+        "batch_size": 2,
+        "learning_rate": 0.0001,
+        "lora_rank": 8,
+        "save_at_fractions": [
+          1.0
+        ]
+      }
+    },
+    "backend": {
+      "kind": "skyrl",
+      "params": {
+        "health_check": true,
+        "compute": {
+          "kind": "skypilot",
+          "params": {
+            "model": "Qwen/Qwen3-0.6B",
+            "infra": "daytona",
+            "accelerators": [
+              "RTX-5090:1"
+            ],
+            "cpus": "8",
+            "memory": "32",
+            "cluster_name": "dt-sft",
+            "spot": "never"
+          }
+        }
+      }
+    },
+    "seed": 42,
+    "tags": []
+  },
+  "status": "failed",
+  "error_message": "ComputeError: accelerators=['RTX-5090:1'] offer none of A100/H100/H200 \u2014 fix the accelerator chain\nTraceback (most recent call last):\n  File \"/Users/shrey/Documents/trajectory/wt-daytona-cloud/src/evsys_sdk/runner.py\", line 204, in _execute_run\n    handles = backend.prepare(\n              ^^^^^^^^^^^^^^^^\n  File \"/Users/shrey/Documents/trajectory/wt-daytona-cloud/src/evsys_sdk/backends/skyrl.py\", line 139, in prepare\n    self.base_url = self._compute.up().rstrip(\"/\")\n                    ^^^^^^^^^^^^^^^^^^\n  File \"/Users/shrey/Documents/trajectory/wt-daytona-cloud/src/evsys_sdk/compute/skypilot.py\", line 2706, in up\n    return self._up_impl()\n           ^^^^^^^^^^^^^^^\n  File \"/Users/shrey/Documents/trajectory/wt-daytona-cloud/src/evsys_sdk/compute/skypilot.py\", line 2750, in _up_impl\n    self._launch_once(sky, spec, attempt=attempt, attempts=attempts)\n  File \"/Users/shrey/Documents/trajectory/wt-daytona-cloud/src/evsys_sdk/compute/skypilot.py\", line 2784, in _launch_once\n    task = self._task(sky, spec)\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/shrey/Documents/trajectory/wt-daytona-cloud/src/evsys_sdk/compute/skypilot.py\", line 1963, in _task\n    candidates = self._candidates()\n                 ^^^^^^^^^^^^^^^^^^\n  File \"/Users/shrey/Documents/trajectory/wt-daytona-cloud/src/evsys_sdk/compute/skypilot.py\", line 2441, in _candidates\n    accels = self._filter_families(self._as_list(self.cfg.accelerators))\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/shrey/Documents/trajectory/wt-daytona-cloud/src/evsys_sdk/compute/skypilot.py\", line 2484, in _filter_families\n    raise ComputeError(\nevsys_sdk.compute.base.ComputeError: accelerators=['RTX-5090:1'] offer none of A100/H100/H200 \u2014 fix the accelerator chain\n",
+  "_updated_at": 1787631935.939955
+}

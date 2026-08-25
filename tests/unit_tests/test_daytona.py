@@ -357,10 +357,11 @@ class TestContainerRealities:
         info = daytona_instance.get_cluster_info('us', 'c-1')
         assert info.custom_ray_options == {}
 
-    def test_no_proxy_is_set_alongside_the_allow_list(self, api_key,
-                                                     monkeypatch):
-        # A domainAllowList makes Daytona inject an HTTP/1.1 CONNECT proxy,
-        # which cannot carry HTTP/2 -- `uv sync` dies with "tunnel error".
+    def test_allow_list_is_sent_but_no_proxy_is_not(self, api_key,
+                                                    monkeypatch):
+        # The allow list goes on the create; the no_proxy that neutralises the
+        # proxy it induces does NOT -- Daytona overwrites a create-time value
+        # with its own at runtime, so bootstrap_node writes it post-boot.
         seen = {}
 
         def fake(method, path, params=None, body=None, **kw):
@@ -370,23 +371,23 @@ class TestContainerRealities:
         monkeypatch.setattr(daytona_utils, '_request', fake)
         daytona_utils.create_sandbox('c-1', {
             'Cpu': 4, 'Memory': 16, 'Disk': 50, 'Gpu': 1, 'GpuType': 'H100',
-            'DefaultImage': 'x', 'DomainAllowList': ['pypi.org', '*.hf.co'],
+            'DefaultImage': 'x',
+            'DomainAllowList': ['pypi.org', '*.hf.co'],
         })
         body = seen['body']
         assert body['domainAllowList'] == 'pypi.org,*.hf.co'
-        assert body['env']['no_proxy'] == 'pypi.org,hf.co'
-        assert body['env']['NO_PROXY'] == 'pypi.org,hf.co'
+        assert 'no_proxy' not in (body.get('env') or {})
 
 
 class TestDocumentedDefaults:
     """Behaviour that follows Daytona's own docs rather than experiment."""
 
-    def test_no_allow_list_by_default_so_no_proxy_is_injected(
+    def test_allow_list_carries_the_one_non_essential_host(
             self, api_key, monkeypatch):
-        # Essential services (pypi, astral.sh, github, conda, pytorch.org, HF,
-        # ubuntu/debian) are reachable on EVERY tier with no configuration.
-        # Setting domainAllowList replaces that broader default AND makes
-        # Daytona inject an HTTP/1.1 CONNECT proxy that cannot carry HTTP/2.
+        # Essential services cover almost everything, but SkyRL's lockfile
+        # pulls vLLM from wheels.vllm.ai, which is NOT essential and is
+        # connection-reset on Tier 1/2. domainAllowList REPLACES the default,
+        # so the list must restate what we depend on and add that host.
         seen = {}
 
         def fake(method, path, params=None, body=None, **kw):
@@ -398,8 +399,33 @@ class TestDocumentedDefaults:
             'Cpu': 4, 'Memory': 16, 'Disk': 50, 'Gpu': 1, 'GpuType': 'H100',
             'DefaultImage': 'x',
         })
-        assert 'domainAllowList' not in seen['body']
+        allow = seen['body']['domainAllowList']
+        assert 'wheels.vllm.ai' in allow
+        for essential in ('pypi.org', 'astral.sh', 'github.com',
+                          'huggingface.co'):
+            assert essential in allow
+
+    def test_no_proxy_is_not_set_at_create_time(self, api_key, monkeypatch):
+        # Daytona overwrites a create-time no_proxy with its own at runtime,
+        # so setting it there is a silent no-op. bootstrap_node does it.
+        seen = {}
+        monkeypatch.setattr(
+            daytona_utils, '_request',
+            lambda m, p, params=None, body=None, **k: (
+                seen.update(body=body) or {'id': 'sbx-1'}))
+        daytona_utils.create_sandbox('c-1', {
+            'Cpu': 4, 'Memory': 16, 'Disk': 50, 'Gpu': 1, 'GpuType': 'H100',
+            'DefaultImage': 'x',
+        })
         assert 'no_proxy' not in (seen['body'].get('env') or {})
+
+    def test_no_proxy_covers_hosts_and_local_ranges(self):
+        v = daytona_utils.no_proxy_value()
+        # uv over HTTP/2 to the allow-listed hosts...
+        assert 'wheels.vllm.ai' in v and 'pypi.org' in v
+        # ...and ray's own gRPC to itself.
+        assert 'localhost' in v and '127.0.0.1' in v
+        assert '172.16.0.0/12' in v
 
     def test_ray_is_pinned_to_loopback(self, api_key, monkeypatch):
         # Ray otherwise advertises GCS on the sandbox's veth address, and

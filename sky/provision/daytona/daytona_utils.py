@@ -300,27 +300,91 @@ def check_gpu_quota(region: str, gpu_count: int) -> Optional[str]:
 #: "Domain allow list cannot contain more than 20 domains").
 MAX_DOMAIN_ALLOW_LIST = 20
 
-#: **No allow list by default, and that is the documented answer.**
-#:
-#: Daytona's "essential services" are reachable on *every* tier without any
-#: configuration, and they already cover everything a SkyPilot node needs to
-#: build itself -- ``pypi.org`` / ``files.pythonhosted.org`` /
-#: ``bootstrap.pypa.io``, ``astral.sh`` + ``*.astral.sh`` (the uv installer),
-#: ``repo.anaconda.com``, ``github.com`` / ``*.github.com`` /
-#: ``*.githubusercontent.com``, ``pytorch.org`` / ``*.pytorch.org``,
-#: ``huggingface.co`` / ``*.hf.co`` / ``*.xethub.hf.co``, and the Ubuntu and
-#: Debian archives.
+#: Daytona's "essential services" are reachable on every tier with no
+#: configuration, and they cover almost everything a SkyPilot + SkyRL node
+#: needs: pypi, ``astral.sh`` (uv), ``repo.anaconda.com``, github,
+#: ``pytorch.org``, huggingface, ubuntu/debian.
 #: (https://www.daytona.io/docs/en/network-limits.md#essential-services)
 #:
-#: Setting ``domainAllowList`` therefore does not *add* to that set -- it
-#: REPLACES the tier default with a narrower one, and it makes Daytona inject
-#: ``HTTP_PROXY``/``HTTPS_PROXY`` into the sandbox. That injected proxy is
-#: HTTP/1.1 CONNECT only, which is what broke ``uv sync`` with
-#: ``tunnel error: unsuccessful``. Two self-inflicted failures for no benefit.
+#: **Almost.** SkyRL's lockfile pulls vLLM from ``wheels.vllm.ai``, which is
+#: not an essential service, so on a Tier 1/2 organization it is
+#: connection-reset: ``Failed to download vllm==0.23.0+cu129 ... Connection
+#: reset by peer (os error 104)``. Everything else in the sync succeeds --
+#: Megatron even builds from github -- and the install dies on that one host.
 #:
-#: The knob stays for a workload that genuinely needs a domain outside the
-#: essential set; the default is to leave Daytona's own policy alone.
-DEFAULT_DOMAIN_ALLOW_LIST: tuple = ()
+#: There is no way to *add* a domain: ``domainAllowList`` REPLACES the tier
+#: default. So this list has to restate the essential set we depend on and add
+#: the missing host, and it must stay within Daytona's cap of 20 entries
+#: (measured: 24 -> HTTP 400). Wildcards keep it to 18 with headroom.
+#:
+#: Setting it also makes Daytona inject ``HTTP_PROXY``/``HTTPS_PROXY``, and
+#: that proxy is HTTP/1.1 CONNECT only -- which is what broke ``uv sync`` with
+#: ``tunnel error: unsuccessful`` the first time round. :func:`bootstrap_node`
+#: is where that is neutralised, because a ``no_proxy`` set at create time is
+#: overwritten by Daytona's own runtime injection.
+MAX_DOMAIN_ALLOW_LIST = 20
+
+DEFAULT_DOMAIN_ALLOW_LIST: tuple = (
+    # The one host that is NOT an essential service and that SkyRL cannot do
+    # without. This entry is the whole reason the list exists.
+    'wheels.vllm.ai',
+    # PyPI
+    'pypi.org',
+    '*.pythonhosted.org',
+    'bootstrap.pypa.io',
+    # uv
+    'astral.sh',
+    '*.astral.sh',
+    # conda
+    'repo.anaconda.com',
+    # GitHub (SkyRL clone; Megatron-LM and Megatron-Bridge build from source)
+    'github.com',
+    '*.github.com',
+    '*.githubusercontent.com',
+    # Torch wheels
+    '*.pytorch.org',
+    # Hugging Face model downloads
+    'huggingface.co',
+    '*.huggingface.co',
+    'hf.co',
+    '*.hf.co',
+    '*.xethub.hf.co',
+    # Distro archives
+    '*.ubuntu.com',
+    '*.debian.org',
+)
+
+
+def shell_quote(value: str) -> str:
+    """Single-quote a value for a POSIX shell."""
+    return "'" + str(value).replace("'", "'\\''") + "'"
+
+
+def no_proxy_value(allow: Optional[List[str]] = None) -> str:
+    """The ``no_proxy`` a sandbox needs when an allow list is in force.
+
+    Two distinct things have to bypass the injected CONNECT proxy:
+
+    * **the allow-listed hosts**, because the proxy is HTTP/1.1 only and uv
+      negotiates HTTP/2 (``tunnel error: unsuccessful``), and
+    * **loopback and the sandbox's own private address**, because ray talks to
+      itself over gRPC and a proxied local connection is how GCS ends up
+      unreachable from the node hosting it.
+
+    This does not widen egress. With a ``domainAllowList`` in force the
+    firewall still decides what leaves the box; ``no_proxy`` only stops
+    well-behaved clients wrapping allowed traffic in CONNECT.
+    """
+    hosts = ['localhost', '127.0.0.1', '::1',
+             '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']
+    for domain in (allow if allow is not None else DEFAULT_DOMAIN_ALLOW_LIST):
+        hosts.append(str(domain).lstrip('*.'))
+    seen, out = set(), []
+    for h in hosts:
+        if h and h not in seen:
+            seen.add(h)
+            out.append(h)
+    return ','.join(out)
 
 
 # -- sandboxes --------------------------------------------------------------
@@ -409,11 +473,10 @@ def create_sandbox(cluster_name_on_cloud: str, node_config: Dict[str,
         # is redirected at the network layer, which a sandbox cannot bypass by
         # clearing an environment variable. It only stops well-behaved clients
         # from wrapping their own traffic in CONNECT.
-        no_proxy = ','.join(d.lstrip('*.') for d in allow)
-        env = dict(body.get('env') or {})
-        env.setdefault('no_proxy', no_proxy)
-        env.setdefault('NO_PROXY', no_proxy)
-        body['env'] = env
+        # NOT set as create-time `env`: Daytona injects its own
+        # `no_proxy=localhost,127.0.0.1,::1` at runtime and overwrites it.
+        # bootstrap_node writes it to /etc/environment and ~/.bashrc instead,
+        # which is what SETUP's `bash --login` actually reads.
         # Only set when non-empty: an empty value would REPLACE the tier
         # default with nothing and cut off ALL egress.
         body['domainAllowList'] = ','.join(allow)
@@ -800,7 +863,8 @@ SUDO_SHIM = (
     'chmod +x /usr/local/bin/sudo; }')
 
 
-def bootstrap_node(sandbox_id: str) -> None:
+def bootstrap_node(sandbox_id: str,
+                   allow: Optional[List[str]] = None) -> None:
     """Make a fresh sandbox look enough like a VM for SkyPilot's setup.
 
     Two gaps, both measured on a live sandbox rather than guessed:
@@ -809,10 +873,26 @@ def bootstrap_node(sandbox_id: str) -> None:
     * no ``~/.ssh`` directory, which several of SkyPilot's setup steps append
       to before anything creates it.
     """
+    no_proxy = no_proxy_value(allow)
+    # Written into /etc/environment AND ~/.bashrc rather than passed as create
+    # `env`: Daytona injects its own `no_proxy=localhost,127.0.0.1,::1` at
+    # runtime, which OVERWRITES anything set at create time (measured). SETUP
+    # runs under `bash --login`, so ~/.bashrc is the file that reaches it.
+    proxy_fix = ''
+    if no_proxy:
+        proxy_fix = (
+            f'grep -q SKY_NO_PROXY {REMOTE_HOME}/.bashrc 2>/dev/null || '
+            f'printf \'# SKY_NO_PROXY\\nexport no_proxy=%s\\n'
+            f'export NO_PROXY=%s\\n\' {shell_quote(no_proxy)} '
+            f'{shell_quote(no_proxy)} >> {REMOTE_HOME}/.bashrc; '
+            f'printf \'no_proxy=%s\\nNO_PROXY=%s\\n\' '
+            f'{shell_quote(no_proxy)} {shell_quote(no_proxy)} '
+            '>> /etc/environment; ')
     rc, out = exec_command(
         sandbox_id,
         f'set -e; {SUDO_SHIM}; mkdir -p {REMOTE_HOME}/.ssh; '
         f'chmod 700 {REMOTE_HOME}/.ssh; touch {REMOTE_HOME}/.ssh/config; '
+        f'{proxy_fix}'
         'command -v sudo >/dev/null && echo SKY_BOOTSTRAP_OK',
         timeout_s=180)
     if rc != 0 or 'SKY_BOOTSTRAP_OK' not in out:

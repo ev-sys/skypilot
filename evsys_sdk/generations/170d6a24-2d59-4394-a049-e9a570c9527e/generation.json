@@ -1,0 +1,113 @@
+{
+  "id": "170d6a24-2d59-4394-a049-e9a570c9527e",
+  "_created_at": 1787631868.582602,
+  "experiment_id": "264d3ddc-6a10-40eb-a48d-6bb32113214c",
+  "seed": 42,
+  "recipe_kind": "sft",
+  "run_config": {
+    "name": "sft_lora_daytona",
+    "data": {
+      "source_kind": "jsonl",
+      "dataset_id": null,
+      "dataset_name": null,
+      "path": null,
+      "rows": [
+        {
+          "messages": [
+            {
+              "role": "user",
+              "content": "What is Daytona?"
+            },
+            {
+              "role": "assistant",
+              "content": "Daytona rents GPU sandboxes by the second."
+            }
+          ]
+        },
+        {
+          "messages": [
+            {
+              "role": "user",
+              "content": "What is SkyPilot?"
+            },
+            {
+              "role": "assistant",
+              "content": "SkyPilot provisions clusters across clouds."
+            }
+          ]
+        },
+        {
+          "messages": [
+            {
+              "role": "user",
+              "content": "What is SkyRL?"
+            },
+            {
+              "role": "assistant",
+              "content": "SkyRL serves the Tinker protocol on your GPUs."
+            }
+          ]
+        },
+        {
+          "messages": [
+            {
+              "role": "user",
+              "content": "What is a LoRA adapter?"
+            },
+            {
+              "role": "assistant",
+              "content": "A LoRA adapter trains few parameters."
+            }
+          ]
+        }
+      ],
+      "hf_dataset": null,
+      "hf_split": "train",
+      "transforms": []
+    },
+    "model": {
+      "name": "Qwen/Qwen3-0.6B",
+      "load_checkpoint_path": null,
+      "init_from_checkpoint": null,
+      "renderer_name": null,
+      "thinking": false
+    },
+    "algorithm": {
+      "kind": "sft",
+      "params": {
+        "max_steps": 8,
+        "batch_size": 2,
+        "learning_rate": 0.0001,
+        "lora_rank": 8,
+        "save_at_fractions": [
+          1.0
+        ]
+      }
+    },
+    "backend": {
+      "kind": "skyrl",
+      "params": {
+        "health_check": true,
+        "compute": {
+          "kind": "skypilot",
+          "params": {
+            "model": "Qwen/Qwen3-0.6B",
+            "infra": "daytona",
+            "accelerators": [
+              "RTX-5090:1"
+            ],
+            "cpus": "8",
+            "memory": "32",
+            "cluster_name": "dt-sft",
+            "spot": "never"
+          }
+        }
+      }
+    },
+    "seed": 42,
+    "tags": []
+  },
+  "status": "completed",
+  "error_message": null,
+  "_updated_at": 1787631873.658802
+}

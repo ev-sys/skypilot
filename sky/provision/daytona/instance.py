@@ -139,7 +139,8 @@ def run_instances(region: str, cluster_name: str, cluster_name_on_cloud: str,
     # Daytona's stock images are root-without-sudo and have no ~/.ssh; both
     # break SkyPilot's setup commands. Same teardown-on-failure rule applies.
     try:
-        daytona_utils.bootstrap_node(sandbox_id)
+        daytona_utils.bootstrap_node(
+            sandbox_id, node_config.get('DomainAllowList'))
     except Exception:
         logger.warning(f'Daytona sandbox {sandbox_id} failed bootstrap; '
                        'deleting it rather than leaving a GPU billing.')
