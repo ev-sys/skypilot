@@ -1,0 +1,11 @@
+{
+  "id": "eff3b408-6612-4615-bfdd-690fbbfe01af",
+  "_created_at": 1787631919.4239209,
+  "experiment_name": "daytona_skyrl_sft",
+  "hypothesis": null,
+  "tags": [],
+  "status": "completed",
+  "best_score": null,
+  "conclusion": "All 1 arms failed.",
+  "_updated_at": 1787631935.9410508
+}

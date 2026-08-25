@@ -1530,6 +1530,52 @@ _CONTAINER_MOUNTS_SCHEMA = {
     },
 }
 
+# Daytona rides `~/.sky/config.yaml` under the `daytona` cloud rather than the
+# task YAML, mirroring Modal above: the fleet adds no new task-YAML surface.
+# Read by `sky/clouds/daytona.py` via `get_effective_region_config`, hence the
+# same properties are accepted both at the top level and per-region under
+# `region_configs`.
+_DAYTONA_CLOUD_PROPERTIES = {
+    # Docker image the sandbox boots. Sent as a one-line build context, since
+    # POST /sandbox has no `image` field.
+    'image': {
+        'type': 'string',
+    },
+    # Boot from a named Daytona snapshot instead. Wins over `image`, and takes
+    # its shape from the snapshot -- the API rejects resources alongside one.
+    'snapshot': {
+        'type': 'string',
+    },
+    'startup_timeout': {
+        'type': 'integer',
+    },
+    # The teardown that survives this process dying. AUTOSTOP and
+    # AUTO_TERMINATE are unsupported on Daytona, but the platform enforces this
+    # wall-clock deadline itself regardless of sandbox state.
+    'ttl_minutes': {
+        'type': 'integer',
+    },
+    # Lifetime of a minted SSH access token. Re-minted on every
+    # get_cluster_info(), so this only bounds how stale a cached one can be.
+    'ssh_access_minutes': {
+        'type': 'integer',
+    },
+    # Lifetime of the signed preview URL. Anyone holding it reaches the port
+    # until it expires, and SkyRL authenticates nothing itself.
+    'signed_url_seconds': {
+        'type': 'integer',
+    },
+    # Daytona REPLACES its tier default with this list rather than extending
+    # it, so a list must name everything the node needs. [] disables it (Tier
+    # 3/4 organizations have full internet).
+    'domain_allow_list': {
+        'type': 'array',
+        'items': {
+            'type': 'string',
+        },
+    },
+}
+
 # Modal rides `~/.sky/config.yaml` under the `modal` cloud rather than the task
 # YAML: the fleet deliberately adds no new task-YAML surface, and `named_image`
 # in particular cannot use `resources.image_id` because IMAGE_ID is an
@@ -2311,6 +2357,27 @@ def get_config_schema():
                     }
                 }
             },
+        },
+        'daytona': {
+            'type': 'object',
+            'required': [],
+            'additionalProperties': False,
+            'properties': {
+                **_DAYTONA_CLOUD_PROPERTIES,
+                'region_configs': {
+                    'type': 'object',
+                    'required': [],
+                    'properties': {},
+                    'additionalProperties': {
+                        'type': 'object',
+                        'required': [],
+                        'additionalProperties': False,
+                        'properties': {
+                            **_DAYTONA_CLOUD_PROPERTIES,
+                        },
+                    }
+                },
+            }
         },
         'modal': {
             'type': 'object',

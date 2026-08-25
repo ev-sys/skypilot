@@ -1,0 +1,135 @@
+{
+  "id": "909cb5fc-8b62-49df-83b9-80335f63b937",
+  "_created_at": 1787632033.770192,
+  "experiment_id": "04a39e42-0687-4ed5-a338-b5a891a6ffc4",
+  "seed": 42,
+  "recipe_kind": "sft",
+  "run_config": {
+    "name": "sft_lora_daytona",
+    "data": {
+      "source_kind": "in_memory",
+      "dataset_id": null,
+      "dataset_name": null,
+      "path": null,
+      "rows": [
+        {
+          "messages": [
+            {
+              "role": "user",
+              "content": "What is Daytona?"
+            },
+            {
+              "role": "assistant",
+              "content": "Daytona rents GPU sandboxes by the second."
+            }
+          ]
+        },
+        {
+          "messages": [
+            {
+              "role": "user",
+              "content": "What is SkyPilot?"
+            },
+            {
+              "role": "assistant",
+              "content": "SkyPilot provisions clusters across clouds."
+            }
+          ]
+        },
+        {
+          "messages": [
+            {
+              "role": "user",
+              "content": "What is SkyRL?"
+            },
+            {
+              "role": "assistant",
+              "content": "SkyRL serves the Tinker protocol on your GPUs."
+            }
+          ]
+        },
+        {
+          "messages": [
+            {
+              "role": "user",
+              "content": "What is a LoRA adapter?"
+            },
+            {
+              "role": "assistant",
+              "content": "A LoRA adapter trains few parameters."
+            }
+          ]
+        }
+      ],
+      "hf_dataset": null,
+      "hf_split": "train",
+      "transforms": []
+    },
+    "model": {
+      "name": "Qwen/Qwen3-0.6B",
+      "load_checkpoint_path": null,
+      "init_from_checkpoint": null,
+      "renderer_name": null,
+      "thinking": false
+    },
+    "algorithm": {
+      "kind": "sft",
+      "params": {
+        "max_steps": 8,
+        "batch_size": 2,
+        "learning_rate": 0.0001,
+        "lora_rank": 8,
+        "save_at_fractions": [
+          1.0
+        ]
+      }
+    },
+    "backend": {
+      "kind": "skyrl",
+      "params": {
+        "health_check": true,
+        "base_url": "https://8000-l2jbahl4vjpbcycb.daytonaproxy01.net",
+        "lifecycle": "attach",
+        "compute": {
+          "kind": "skypilot",
+          "params": {
+            "model": "Qwen/Qwen3-0.6B",
+            "infra": "daytona",
+            "image_id": "auto",
+            "accelerators": [
+              "H100:1"
+            ],
+            "num_nodes": 1,
+            "managed": false,
+            "cpus": "8",
+            "memory": "32",
+            "use_spot": false,
+            "spot": "never",
+            "algorithm": "sft",
+            "multi_lora": true,
+            "max_adapters": 8,
+            "server_backend": "megatron",
+            "cluster_name": "evsys-pack-qwen-qwen3-0-6b-9f090a6c",
+            "idle_minutes_to_autostop": 30,
+            "down": true,
+            "remote_identity": "NO_UPLOAD",
+            "checkpoints_path": "gs://evsys-checkpoints-metal-arc-504819-q1/evsys-pack-qwen-qwen3-0-6b-9f090a6c",
+            "price_check": true,
+            "retry_until_up": false,
+            "startup_timeout_s": 2400.0,
+            "startup_vanish_relaunches": 3,
+            "server_logs": true,
+            "server_log_policy": "smart",
+            "teardown": true,
+            "max_lifetime_s": 21600
+          }
+        }
+      }
+    },
+    "seed": 42,
+    "tags": []
+  },
+  "status": "failed",
+  "error_message": "RuntimeError: tinker.ServiceClient() did not connect within 90s. It retries auth internally, so a transport failure hangs instead of raising. The usual cause is the HTTP transport: pyqwest 0.7.0 fails TLS verification ('invalid peer certificate: UnknownIssuer'). Installed: pyqwest 0.6.1 \u2014 pin pyqwest==0.6.1. Check reachability and TINKER_API_KEY too.\nTraceback (most recent call last):\n  File \"/Users/shrey/Documents/trajectory/wt-daytona-cloud/src/evsys_sdk/backends/tinker.py\", line 58, in _connect\n    return pool.submit(tinker.ServiceClient, **kwargs).result(CONNECT_TIMEOUT_S)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/shrey/.local/share/uv/python/cpython-3.12.11-macos-aarch64-none/lib/python3.12/concurrent/futures/_base.py\", line 458, in result\n    raise TimeoutError()\nTimeoutError\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/Users/shrey/Documents/trajectory/wt-daytona-cloud/src/evsys_sdk/runner.py\", line 204, in _execute_run\n    handles = backend.prepare(\n              ^^^^^^^^^^^^^^^^\n  File \"/Users/shrey/Documents/trajectory/wt-daytona-cloud/src/evsys_sdk/backends/skyrl.py\", line 149, in prepare\n    service_client = _connect({\"base_url\": self.base_url})\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/shrey/Documents/trajectory/wt-daytona-cloud/src/evsys_sdk/backends/tinker.py\", line 60, in _connect\n    raise RuntimeError(\nRuntimeError: tinker.ServiceClient() did not connect within 90s. It retries auth internally, so a transport failure hangs instead of raising. The usual cause is the HTTP transport: pyqwest 0.7.0 fails TLS verification ('invalid peer certificate: UnknownIssuer'). Installed: pyqwest 0.6.1 \u2014 pin pyqwest==0.6.1. Check reachability and TINKER_API_KEY too.\n",
+  "_updated_at": 1787632124.326108
+}

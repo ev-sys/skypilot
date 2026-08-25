@@ -1540,6 +1540,11 @@ def _add_auth_to_cluster_config(cloud: clouds.Cloud, tmp_yaml_path: str):
             clouds.DO,
             clouds.Nebius,
             clouds.Modal,
+            # Daytona nodes are reached over HTTPS, never SSH (see
+            # sky/provision/daytona/instance.py), so there is no cloud-side key
+            # to register. configure_ssh_info still fills in the local key
+            # paths the ray YAML references, which is all that is needed.
+            clouds.Daytona,
             clouds.Yotta,
         )):
         config = auth.configure_ssh_info(config)
